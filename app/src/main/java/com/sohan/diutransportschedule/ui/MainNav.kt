@@ -16,32 +16,49 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.*
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.TileMode
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainNav(vm: HomeViewModel) {
-
+fun MainNav(
+    vm: HomeViewModel,
+    openNotice: Boolean = false,
+    onNoticeOpened: () -> Unit = {}
+) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: "home"
 
-    Scaffold(
-        // Use themed background so dark mode doesn't reveal a light window background
-        containerColor = MaterialTheme.colorScheme.background,
+    LaunchedEffect(openNotice) {
+        if (openNotice) {
+            nav.navigate("notice") {
+                launchSingleTop = true
+                restoreState = true
+                popUpTo(nav.graph.startDestinationId) { saveState = true }
+            }
+            onNoticeOpened()
+        }
+    }
 
-        // ✅ Premium Floating Bottom Bar (Custom)
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             PremiumBottomBar(
-                currentRoute = currentRoute,
-                onHome = {
-                    nav.navigate("home") {
-                        launchSingleTop = true
-                        restoreState = true
-                        popUpTo(nav.graph.startDestinationId) { saveState = true }
-                    }
+                selected = when (currentRoute) {
+                    "notice" -> BottomTab.NOTICE
+                    "profile" -> BottomTab.PROFILE
+                    else -> BottomTab.HOME
                 },
-                onProfile = {
-                    nav.navigate("profile") {
+                onSelect = { tab ->
+                    val route = when (tab) {
+                        BottomTab.HOME -> "home"
+                        BottomTab.NOTICE -> "notice"
+                        BottomTab.PROFILE -> "profile"
+                    }
+                    nav.navigate(route) {
                         launchSingleTop = true
                         restoreState = true
                         popUpTo(nav.graph.startDestinationId) { saveState = true }
@@ -49,105 +66,14 @@ fun MainNav(vm: HomeViewModel) {
                 }
             )
         }
-
     ) { pad ->
-
-        // ✅ IMPORTANT: NavHost এ padding দিও না (pad screen এ যাবে)
         NavHost(
             navController = nav,
             startDestination = "home"
         ) {
-            composable("home") { HomeScreen(vm, pad) }
+            composable("home") { HomeScreen(vm = vm, pad = pad) }
+            composable("notice") { NoticeScreen(pad = pad) }
             composable("profile") { ProfileScreen(vm) }
-        }
-    }
-}
-
-/* ------------------ Premium Bottom Bar ------------------ */
-
-@Composable
-private fun PremiumBottomBar(
-    currentRoute: String,
-    onHome: () -> Unit,
-    onProfile: () -> Unit
-) {
-    // Outer area must stay transparent (no big background behind the rounded bar)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color.Transparent)
-            .navigationBarsPadding()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        // Use app theme colors (respects vm.darkMode)
-        val pillColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp)
-
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            tonalElevation = 2.dp,
-            shadowElevation = 10.dp,
-            color = pillColor
-        ) {
-            Row(
-                modifier = Modifier
-                    .padding(horizontal = 10.dp, vertical = 10.dp)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-
-                PremiumBottomItem(
-                    selected = currentRoute == "home",
-                    label = "Home",
-                    icon = { Icon(Icons.Default.Home, contentDescription = null) },
-                    onClick = onHome
-                )
-
-                PremiumBottomItem(
-                    selected = currentRoute == "profile",
-                    label = "Profile",
-                    icon = { Icon(Icons.Default.Person, contentDescription = null) },
-                    onClick = onProfile
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun PremiumBottomItem(
-    selected: Boolean,
-    label: String,
-    icon: @Composable () -> Unit,
-    onClick: () -> Unit
-) {
-    val activeColor = MaterialTheme.colorScheme.secondary
-    val inactiveColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(
-                if (selected) activeColor.copy(alpha = 0.10f) else Color.Transparent
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        CompositionLocalProvider(
-            LocalContentColor provides (if (selected) activeColor else inactiveColor)
-        ) {
-            icon()
-
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                color = if (selected) activeColor else inactiveColor
-            )
         }
     }
 }

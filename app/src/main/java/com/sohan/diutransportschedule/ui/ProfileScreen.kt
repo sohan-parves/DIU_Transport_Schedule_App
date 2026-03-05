@@ -6,13 +6,25 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.PaddingValues
+// import androidx.compose.foundation.layout.calculateBottomPadding -- removed, not available
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Check
@@ -53,11 +65,34 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.ui.platform.LocalContext
+import android.content.Context
+import androidx.compose.runtime.LaunchedEffect
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(vm: HomeViewModel) {
     val dark by vm.darkMode.collectAsState()
     val selectedRoute by vm.selectedRoute.collectAsState()
+
+    // ✅ First install default: route = ALL -> notifications must be OFF.
+    // ✅ Any specific route selected -> notifications auto ON.
+    LaunchedEffect(selectedRoute) {
+        val isAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
+        if (isAll) {
+            if (vm.notificationsEnabled.value) {
+                vm.setNotificationsEnabled(false)
+            } else {
+                // still ensure persisted OFF on first install
+                vm.setNotificationsEnabled(false)
+            }
+        } else {
+            // auto-enable when user selects a real route
+            if (!vm.notificationsEnabled.value) {
+                vm.setNotificationsEnabled(true)
+            }
+        }
+    }
 
 // ✅ Always use FULL route list from VM (not filtered by Home)
     val routeOptions by vm.routeOptions.collectAsState()
@@ -65,6 +100,28 @@ fun ProfileScreen(vm: HomeViewModel) {
     val isSyncing by vm.isSyncing.collectAsState()
     val primaryText = if (dark) Color.White else MaterialTheme.colorScheme.onSurface
     val secondaryText = if (dark) Color.White.copy(alpha = 0.88f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val view = LocalView.current
+    val notificationsEnabled by vm.notificationsEnabled.collectAsState()
+    val notifyLeadMinutes by vm.notifyLeadMinutes.collectAsState()
+    val navBarBottomPad = with(LocalDensity.current) {
+        val bottomPx = runCatching {
+            ViewCompat.getRootWindowInsets(view)
+                ?.getInsets(WindowInsetsCompat.Type.navigationBars())
+                ?.bottom
+        }.getOrNull() ?: 0
+        bottomPx.toDp()
+    }
+    val ctx = LocalContext.current
+
+    val alertPrefs = remember(ctx) { ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE) }
+
+    var alarmSound5mEnabled by rememberSaveable {
+        mutableStateOf(alertPrefs.getBoolean("alarm_sound_5m", true))
+    }
+
+    var alarmVibrate5mEnabled by rememberSaveable {
+        mutableStateOf(alertPrefs.getBoolean("alarm_vibrate_5m", true))
+    }
 
     // Premium card styling (light mode)
     val premiumLightCard = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp)
@@ -84,19 +141,24 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val showUpdateBanner by vm.showUpdateBanner.collectAsState()
     val compactMode by vm.compactMode.collectAsState()
-    val notificationsEnabled by vm.notificationsEnabled.collectAsState()
-    val notifyLeadMinutes by vm.notifyLeadMinutes.collectAsState()
+
 
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
+        val scrollState = rememberScrollState()
+
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
+                .fillMaxWidth()
+                .verticalScroll(scrollState)
+                .padding(start = 16.dp, end = 16.dp, top = 16.dp)
+                .padding(bottom = 24.dp + navBarBottomPad + 72.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            Spacer(Modifier.height(28.dp))
+
             Text(
                 text = "Profile",
                 style = MaterialTheme.typography.headlineSmall,
@@ -143,9 +205,17 @@ fun ProfileScreen(vm: HomeViewModel) {
                         else
                             MaterialTheme.colorScheme.primary
 
+                        // 🔒 UI-level throttle for refresh button (5 minutes)
+                        var lastRefreshTapMs by rememberSaveable { mutableStateOf(0L) }
+                        val canTapRefresh = !isSyncing &&
+                            (System.currentTimeMillis() - lastRefreshTapMs >= 5 * 60 * 1000L)
+
                         IconButton(
-                            onClick = { vm.refresh(showBannerIfUpdated = true) },
-                            enabled = !isSyncing,
+                            onClick = {
+                                lastRefreshTapMs = System.currentTimeMillis()
+                                vm.refresh(showBannerIfUpdated = true)
+                            },
+                            enabled = canTapRefresh,
                             colors = IconButtonDefaults.iconButtonColors(contentColor = refreshColor)
                         ) {
                             if (isSyncing) {
@@ -178,28 +248,32 @@ fun ProfileScreen(vm: HomeViewModel) {
                             colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors()
                         )
 
-                        // ✅ Material3 correct menu
-                        DropdownMenu(
+                        // ✅ Anchored menu (starts from the Selected route field)
+                        ExposedDropdownMenu(
                             expanded = routeMenuExpanded,
                             onDismissRequest = { routeMenuExpanded = false },
                             modifier = Modifier
-                                .padding(top = 6.dp)
-                                .background(color = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard, shape = RoundedCornerShape(18.dp))
+                                .exposedDropdownSize(true)
+                                .heightIn(max = 420.dp)
+                                .padding(bottom = navBarBottomPad)
+                                .background(
+                                    color = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard,
+                                    shape = RoundedCornerShape(18.dp)
+                                )
                         ) {
-                            routeOptions.forEachIndexed { index, opt ->
+                            val dailyRouteOptions = routeOptions.filter { opt ->
+                                val rn = opt.routeNo.trim()
+                                rn.isNotBlank() &&
+                                        !rn.equals("ALL", ignoreCase = true) &&   // ✅ remove ALL
+                                        !rn.startsWith("F", ignoreCase = true)
+                            }
+
+                            dailyRouteOptions.forEachIndexed { index, opt ->
 
                                 val isSelected = opt.routeNo == selectedRoute
 
                                 DropdownMenuItem(
-                                    leadingIcon = {
-                                        if (isSelected) {
-                                            Icon(
-                                                imageVector = Icons.Filled.Check,
-                                                contentDescription = "Selected",
-                                                tint = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                                            )
-                                        }
-                                    },
+                                    contentPadding = PaddingValues(0.dp),
                                     text = {
                                         Box(
                                             modifier = Modifier
@@ -209,33 +283,89 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                     else Color.Transparent,
                                                     shape = RoundedCornerShape(12.dp)
                                                 )
-                                                .padding(vertical = 10.dp, horizontal = 10.dp)
+                                                .padding(vertical = 10.dp, horizontal = 6.dp)
                                         ) {
-                                            Text(
-                                                text = opt.label,
-                                                style = if (isSelected)
-                                                    MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
-                                                else
-                                                    MaterialTheme.typography.bodyLarge,
-                                                color = if (isSelected)
-                                                    if (dark) Color.White
-                                                    else MaterialTheme.colorScheme.primary
-                                                else
-                                                    MaterialTheme.colorScheme.onSurface,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.width(26.dp),
+                                                    contentAlignment = Alignment.CenterStart
+                                                ) {
+                                                    if (isSelected) {
+                                                        Icon(
+                                                            imageVector = Icons.Filled.Check,
+                                                            contentDescription = "Selected",
+                                                            tint = if (dark) MaterialTheme.colorScheme.secondary
+                                                            else MaterialTheme.colorScheme.primary
+                                                        )
+                                                    }
+                                                }
+
+                                                Spacer(Modifier.size(2.dp))
+
+                                                Text(
+                                                    text = opt.routeNo,
+                                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                                                    color = if (isSelected)
+                                                        if (dark) MaterialTheme.colorScheme.secondary
+                                                        else MaterialTheme.colorScheme.primary
+                                                    else
+                                                        MaterialTheme.colorScheme.onSurface,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+
+                                                Spacer(Modifier.size(6.dp))
+
+                                                Box(
+                                                    modifier = Modifier
+                                                        .height(18.dp)
+                                                        .width(1.dp)
+                                                        .background(
+                                                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
+                                                            shape = RoundedCornerShape(1.dp)
+                                                        )
+                                                )
+
+                                                Spacer(Modifier.size(6.dp))
+
+                                                Text(
+                                                    text = opt.label,
+                                                    style = if (isSelected)
+                                                        MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
+                                                    else
+                                                        MaterialTheme.typography.bodyLarge,
+                                                    color = if (isSelected)
+                                                        if (dark) MaterialTheme.colorScheme.secondary
+                                                        else MaterialTheme.colorScheme.primary
+                                                    else
+                                                        MaterialTheme.colorScheme.onSurface,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                         }
                                     },
                                     onClick = {
                                         routeMenuExpanded = false
                                         vm.setSelectedRoute(opt.routeNo)
+
+                                        // If user picks ALL (only possible if ALL exists), force notifications OFF.
+                                        // If user picks a real route, auto-enable notifications.
+                                        val picked = opt.routeNo.trim()
+                                        if (picked.equals("ALL", ignoreCase = true)) {
+                                            vm.setNotificationsEnabled(false)
+                                        } else {
+                                            vm.setNotificationsEnabled(true)
+                                        }
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 )
 
                                 // ✅ divider between items
-                                if (index != routeOptions.lastIndex) {
+                                if (index != dailyRouteOptions.lastIndex) {
                                     HorizontalDivider(
                                         modifier = Modifier.padding(horizontal = 14.dp),
                                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
@@ -336,6 +466,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                         )
                     }
 
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -373,23 +504,33 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 color = primaryText
                             )
                             Text(
-                                text = if (selectedRoute == "ALL")
-                                    "Select a route (not ALL) to receive notifications"
-                                else
-                                    "Get alerts before start/departure time",
+                                text = "Get alerts before start/departure time",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = primaryText
                             )
                         }
                         Switch(
                             checked = notificationsEnabled,
-                            onCheckedChange = { vm.setNotificationsEnabled(it) },
-                            enabled = selectedRoute != "ALL",
+                            onCheckedChange = { enabled ->
+                                vm.setNotificationsEnabled(enabled)
+
+                                // If notifications are turned OFF, also turn OFF ringtone & vibration and persist,
+                                // and update local UI state so switches reflect the saved values.
+                                if (!enabled) {
+                                    alarmSound5mEnabled = false
+                                    alarmVibrate5mEnabled = false
+                                    alertPrefs.edit()
+                                        .putBoolean("alarm_sound_5m", false)
+                                        .putBoolean("alarm_vibrate_5m", false)
+                                        .apply()
+                                }
+                            },
+                            enabled = true,
                             colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                         )
                     }
 
-                    AnimatedVisibility(visible = notificationsEnabled && selectedRoute != "ALL") {
+                    AnimatedVisibility(visible = notificationsEnabled) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
                                 text = "Notify me ${notifyLeadMinutes} minutes before",
@@ -414,6 +555,69 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 style = MaterialTheme.typography.bodySmall,
                                 color = primaryText
                             )
+                        }
+                    }
+                    AnimatedVisibility(visible = notificationsEnabled) {
+                        Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                            HorizontalDivider(color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider)
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Ringtone (5 min)",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = primaryText
+                                    )
+                                    Text(
+                                        text = "Play alarm ringtone for ~5 minutes when a notice arrives",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = secondaryText
+                                    )
+                                }
+                                Switch(
+                                    checked = alarmSound5mEnabled,
+                                    onCheckedChange = {
+                                        alarmSound5mEnabled = it
+                                        alertPrefs.edit().putBoolean("alarm_sound_5m", it).apply()
+                                    },
+                                    enabled = notificationsEnabled,
+                                    colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
+                                )
+                            }
+
+                            HorizontalDivider(color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider)
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Vibration",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = primaryText
+                                    )
+                                    Text(
+                                        text = "Vibrate strongly when a notice arrives",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = secondaryText
+                                    )
+                                }
+                                Switch(
+                                    checked = alarmVibrate5mEnabled,
+                                    onCheckedChange = {
+                                        alarmVibrate5mEnabled = it
+                                        alertPrefs.edit().putBoolean("alarm_vibrate_5m", it).apply()
+                                    },
+                                    enabled = notificationsEnabled,
+                                    colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
+                                )
+                            }
                         }
                     }
 

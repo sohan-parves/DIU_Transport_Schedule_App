@@ -55,8 +55,13 @@ class ScheduleRepository(
         val message = meta.getString("message") ?: ""
 
         val localVersion = store.getLocalVersion()
-        if (remoteVersion <= localVersion) {
-            return SyncResult(false, remoteVersion, message)
+        val updated = remoteVersion > localVersion
+
+        // ✅ READ OPTIMIZATION:
+        // If version hasn't changed and we already have a local version, do NOT re-read the schedule doc.
+        // This keeps returning-user opens at ~1 read (meta/app only).
+        if (!updated && localVersion > 0) {
+            return SyncResult(updated = false, version = remoteVersion, message = message)
         }
 
         val doc = fs.collection("schedules")
@@ -66,9 +71,22 @@ class ScheduleRepository(
             .get().await()
 
         val raw = doc.get("items") as? List<Map<String, Any?>> ?: emptyList()
+        fun isValidRouteNo(rn: String): Boolean {
+            val s = rn.trim()
+            if (s.isBlank()) return false
 
-        val dbItems = raw.map { m ->
+            // Reject section headers like "Friday Schedule @ DSC"
+            if (s.contains("schedule", ignoreCase = true)) return false
+            if (s.contains("@")) return false
+
+            // Real route numbers look like R15 / F1 / F12 etc.
+            return Regex("^[A-Za-z]+\\d+$").matches(s)
+        }
+
+        val dbItems = raw.mapNotNull { m ->
             val routeNo = m["routeNo"] as? String ?: ""
+            if (!isValidRouteNo(routeNo)) return@mapNotNull null
+
             val routeName = m["routeName"] as? String ?: ""
             val routeDetails = m["routeDetails"] as? String ?: ""
             val startTimes =
@@ -88,9 +106,11 @@ class ScheduleRepository(
 
         dao.clearAll()
         dao.upsertAll(dbItems)
+
+        // Persist the remote version only after a successful fetch + local DB update
         store.setLocalVersion(remoteVersion)
 
-        return SyncResult(true, remoteVersion, message)
+        return SyncResult(updated, remoteVersion, message)
     }
 
     suspend fun shouldShowUpdate(version: Int): Boolean {

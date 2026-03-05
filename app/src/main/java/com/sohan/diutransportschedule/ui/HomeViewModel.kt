@@ -7,13 +7,17 @@ import com.sohan.diutransportschedule.db.JsonConverters
 import com.sohan.diutransportschedule.sync.ScheduleRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.sohan.diutransportschedule.BuildConfig
 data class UiSchedule(
     val routeNo: String,
     val routeName: String,
     val routeDetails: String,
     val startTimes: List<String>,
-    val departureTimes: List<String>
+    val departureTimes: List<String>,
+    // FRIDAY schedules are tagged by routeNo prefix (e.g., F1/F2). DAILY otherwise.
+    val appliesOn: String
 )
 
 data class RouteOption(
@@ -26,9 +30,9 @@ private fun DbScheduleItem.toUi(): UiSchedule = UiSchedule(
     routeName = routeName,
     routeDetails = routeDetails,
     startTimes = JsonConverters.jsonToList(startTimesJson),
-    departureTimes = JsonConverters.jsonToList(departureTimesJson)
+    departureTimes = JsonConverters.jsonToList(departureTimesJson),
+    appliesOn = if (routeNo.trim().startsWith("F", ignoreCase = true)) "FRIDAY" else "DAILY"
 )
-
 class HomeViewModel(
     private val repo: ScheduleRepository
 ) : ViewModel() {
@@ -37,16 +41,41 @@ class HomeViewModel(
         viewModelScope.launch { repo.ensureDefaultPrefs() }
     }
 
+    // Current installed app version (from app/build.gradle)
+    val currentAppVersionName: String = BuildConfig.VERSION_NAME
+
     private val query = MutableStateFlow("")
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
+    // 🔒 Throttle sync calls to reduce unnecessary Firestore reads
+    private var lastSyncAtMillis: Long = 0L
+    private val minSyncIntervalMillis = 5 * 60 * 1000L // 5 minutes
+    // 🔒 Daily sync cap (extra protection against excessive reads)
+    private var syncCountToday: Int = 0
+    private var syncDayStamp: String = java.time.LocalDate.now().toString()
+    private val maxSyncsPerDay = 30
+
+    private fun canSyncToday(): Boolean {
+        val today = java.time.LocalDate.now().toString()
+        if (today != syncDayStamp) {
+            syncDayStamp = today
+            syncCountToday = 0
+        }
+        return syncCountToday < maxSyncsPerDay
+    }
+
+    private fun markSyncDone() {
+        syncCountToday++
+    }
 
     private val _showUpdate = MutableStateFlow(false)
     val showUpdate: StateFlow<Boolean> = _showUpdate.asStateFlow()
 
     private val _updateMessage = MutableStateFlow("")
     val updateMessage: StateFlow<String> = _updateMessage.asStateFlow()
+
 
     // prefs
     val selectedRoute: StateFlow<String> = repo.selectedRouteFlow
@@ -69,7 +98,18 @@ class HomeViewModel(
 
     // local data -> ui
     private val localUi: Flow<List<UiSchedule>> = repo.observeLocal()
-        .map { list -> list.map { it.toUi() } }
+        .map { list ->
+            list.map { it.toUi() }
+                .filter { ui ->
+                    val rn = ui.routeNo.trim()
+                    val looksLikeRouteNo = Regex("^[A-Za-z]+\\d+$").matches(rn)   // R15, F1 etc
+                    val hasAnyTime =
+                        ui.startTimes.any { it.trim().isNotBlank() } ||
+                                ui.departureTimes.any { it.trim().isNotBlank() }
+
+                    looksLikeRouteNo && hasAnyTime
+                }
+        }
 
     // ✅ Profile dropdown: routeNo + routeName label
     val routeOptions: StateFlow<List<RouteOption>> = localUi
@@ -106,14 +146,40 @@ class HomeViewModel(
             val rawQuery = q.trim()
             val qq = rawQuery.lowercase()
 
-            val base = if (rawQuery.isNotEmpty()) {
-                list // search করলে সব route
-            } else {
-                if (route.equals("ALL", ignoreCase = true)) list
-                else list.filter { it.routeNo.equals(route, ignoreCase = true) }
+            val todayIsFriday = try {
+                java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+            } catch (_: Throwable) {
+                false
             }
 
-            if (qq.isBlank()) base
+            val noFilterHome = rawQuery.isBlank() && route.equals("ALL", ignoreCase = true)
+
+            val base = when {
+                // SEARCH: always show everything
+                rawQuery.isNotEmpty() -> list
+
+                // HOME (no filter): show everything including Friday
+                noFilterHome -> list
+
+                // FILTERED (route selected): apply day rule
+                else -> {
+                    val dayFiltered = if (todayIsFriday) {
+                        list.filter { it.appliesOn == "FRIDAY" }
+                    } else {
+                        list.filter { it.appliesOn != "FRIDAY" }
+                    }
+
+                    // ✅ Friday override: if a specific route is selected (not ALL), still show Friday schedules.
+                    if (todayIsFriday) {
+                        dayFiltered
+                    } else {
+                        if (route.equals("ALL", ignoreCase = true)) dayFiltered
+                        else dayFiltered.filter { it.routeNo.equals(route, ignoreCase = true) }
+                    }
+                }
+            }
+
+            val filtered = if (qq.isBlank()) base
             else base.filter {
                 it.routeNo.lowercase().contains(qq) ||
                         it.routeName.lowercase().contains(qq) ||
@@ -121,6 +187,12 @@ class HomeViewModel(
                         it.startTimes.any { t -> t.lowercase().contains(qq) } ||
                         it.departureTimes.any { t -> t.lowercase().contains(qq) }
             }
+
+            // DAILY first, FRIDAY at the end
+            filtered.sortedWith(
+                compareBy<UiSchedule> { it.appliesOn.equals("FRIDAY", ignoreCase = true) }
+                    .thenBy { it.routeNo }
+            )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun setQuery(q: String) {
@@ -134,6 +206,13 @@ class HomeViewModel(
     fun sync() {
         viewModelScope.launch {
             if (_isSyncing.value) return@launch
+            val now = System.currentTimeMillis()
+            if (now - lastSyncAtMillis < minSyncIntervalMillis) {
+                return@launch
+            }
+            if (!canSyncToday()) {
+                return@launch
+            }
             _isSyncing.value = true
             try {
                 val res = repo.syncIfNeeded()
@@ -145,6 +224,8 @@ class HomeViewModel(
                 }
             } catch (_: Throwable) {
             } finally {
+                lastSyncAtMillis = System.currentTimeMillis()
+                markSyncDone()
                 _isSyncing.value = false
             }
         }
@@ -153,6 +234,14 @@ class HomeViewModel(
     fun refresh(showBannerIfUpdated: Boolean = true) {
         viewModelScope.launch {
             if (_isSyncing.value) return@launch
+            val now = System.currentTimeMillis()
+            if (now - lastSyncAtMillis < minSyncIntervalMillis) {
+                // Too soon since last sync → skip to avoid extra reads
+                return@launch
+            }
+            if (!canSyncToday()) {
+                return@launch
+            }
             _isSyncing.value = true
             try {
                 val res = repo.syncIfNeeded()
@@ -166,6 +255,8 @@ class HomeViewModel(
                 }
             } catch (_: Throwable) {
             } finally {
+                lastSyncAtMillis = System.currentTimeMillis()
+                markSyncDone()
                 _isSyncing.value = false
             }
         }
@@ -195,6 +286,26 @@ class HomeViewModel(
         viewModelScope.launch { repo.setNotifyLeadMinutes(minutes) }
     }
 
+
+    private fun isVersionNewer(latest: String, current: String): Boolean {
+        fun parts(v: String): List<Int> = v.trim()
+            .removePrefix("v")
+            .split(".")
+            .mapNotNull { it.toIntOrNull() }
+            .let { if (it.isEmpty()) listOf(0) else it }
+
+        val a = parts(latest)
+        val b = parts(current)
+        val n = maxOf(a.size, b.size)
+
+        for (i in 0 until n) {
+            val ai = a.getOrElse(i) { 0 }
+            val bi = b.getOrElse(i) { 0 }
+            if (ai != bi) return ai > bi
+        }
+        return false
+    }
+
     fun updateRouteNotifications(
         context: android.content.Context,
         selectedRoute: String,
@@ -202,6 +313,17 @@ class HomeViewModel(
         enabled: Boolean,
         leadMinutes: Int
     ) {
+        // ✅ Friday: keep notifications OFF
+        val todayIsFriday = try {
+            java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+        } catch (_: Throwable) {
+            false
+        }
+        if (todayIsFriday) {
+            RouteNotificationScheduler.cancelAll(context)
+            return
+        }
+
         if (!enabled || selectedRoute.equals("ALL", ignoreCase = true)) {
             RouteNotificationScheduler.cancelAll(context)
             return
@@ -219,7 +341,8 @@ class HomeViewModel(
             routeName = item.routeName,
             startTimes = item.startTimes,
             departureTimes = item.departureTimes,
-            leadMinutes = leadMinutes
+            leadMinutes = leadMinutes,
+            appliesOn = item.appliesOn
         )
     }
 }
@@ -255,7 +378,8 @@ private object RouteNotificationScheduler {
         routeName: String,
         startTimes: List<String>,
         departureTimes: List<String>,
-        leadMinutes: Int
+        leadMinutes: Int,
+        appliesOn: String
     ) {
         ensureChannel(context)
 
@@ -268,14 +392,29 @@ private object RouteNotificationScheduler {
         val now = java.time.ZonedDateTime.now(zone)
         val am = context.getSystemService(android.content.Context.ALARM_SERVICE) as android.app.AlarmManager
 
+        val canExact = !(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S && !am.canScheduleExactAlarms())
+        if (!canExact) {
+            android.util.Log.w("RouteNotificationScheduler", "Exact alarm not allowed; using inexact alarms")
+        }
+
         all.forEach { (kind, raw) ->
             val parsed = parseTime(raw) ?: return@forEach
             val time = parsed.first
             val note = parsed.second
 
             var whenZdt = now.with(time)
-            if (whenZdt.isBefore(now.plusMinutes(1))) whenZdt = whenZdt.plusDays(1)
 
+            if (appliesOn.equals("FRIDAY", ignoreCase = true)) {
+                // Move to next-or-today Friday at this time
+                val dow = now.dayOfWeek
+                val daysUntil = (java.time.DayOfWeek.FRIDAY.value - dow.value + 7) % 7
+                whenZdt = now.plusDays(daysUntil.toLong()).with(time)
+                // If already passed (or too close), move to next week
+                if (whenZdt.isBefore(now.plusMinutes(1))) whenZdt = whenZdt.plusWeeks(1)
+            } else {
+                // DAILY behavior
+                if (whenZdt.isBefore(now.plusMinutes(1))) whenZdt = whenZdt.plusDays(1)
+            }
             val fireAt = whenZdt.minusMinutes(leadMinutes.toLong())
             if (fireAt.isBefore(now.plusSeconds(10))) return@forEach
 
@@ -298,10 +437,19 @@ private object RouteNotificationScheduler {
             )
 
             val triggerAtMillis = fireAt.toInstant().toEpochMilli()
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
-            } else {
-                am.setExact(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+            when {
+                canExact && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M -> {
+                    am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                }
+                canExact -> {
+                    am.setExact(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                }
+                android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M -> {
+                    am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                }
+                else -> {
+                    am.set(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                }
             }
         }
     }
@@ -343,21 +491,38 @@ class RouteAlarmReceiver : android.content.BroadcastReceiver() {
 
         RouteNotificationScheduler.ensureChannel(context)
 
-        val title = "Route $routeNo"
-        val text = buildString {
-            append("$kind at $timeText")
+        val title = timeText  // ✅ time is primary
+        val line1 = buildString {
+            if (kind.isNotBlank()) {
+                append(kind)
+                append(" • ")
+            }
+            append(routeNo)
+        }
+
+        val bigText = buildString {
+            append(line1)
             if (note.isNotBlank()) {
-                append(" — ")
+                append("\n")
                 append(note)
             }
         }
 
         val notif = androidx.core.app.NotificationCompat.Builder(context, "route_notifications")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
+            // TIME is the primary headline
             .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(text))
+            // Secondary info in the collapsed view
+            .setContentText(line1)
+            // Expanded view keeps TIME as big title + shows details
+            .setStyle(
+                androidx.core.app.NotificationCompat.BigTextStyle()
+                    .setBigContentTitle(title)
+                    .setSummaryText("DIU Transport")
+                    .bigText(bigText)
+            )
             .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+            .setCategory(androidx.core.app.NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(true)
             .build()
 

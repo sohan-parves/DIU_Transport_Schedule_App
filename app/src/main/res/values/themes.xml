@@ -1,5 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.DIUTransportSchedule" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Main app theme (Compose uses this after launch) -->
+    <style name="Theme.DIUTransportSchedule" parent="Theme.Material3.Light.NoActionBar">
+        <!-- Prevent white flash behind Compose while launching -->
+        <item name="android:windowBackground">@android:color/black</item>
+        <!-- Optional: keep status bar/navigation consistent on launch -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <!-- Prevent system dark mode from changing UI -->
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+
+    <!-- Android 12+ SplashScreen theme -->
+    <style name="Theme.DIUTransportSchedule.Splash" parent="Theme.SplashScreen">
+        <!-- Dark splash background so it never flashes white -->
+        <item name="windowSplashScreenBackground">@android:color/black</item>
+
+        <!-- Your logo in the center -->
+
+        <!-- Keep icon background transparent (system mask still applies) -->
+        <item name="windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+
+        <!-- After splash, switch to the real app theme -->
+        <item name="postSplashScreenTheme">@style/Theme.DIUTransportSchedule</item>
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+
+        <!-- 🔒 System dark mode যেন UI change না করে -->
+        <item name="android:forceDarkAllowed">false</item>
+
+    </style>
+
 </resources>
