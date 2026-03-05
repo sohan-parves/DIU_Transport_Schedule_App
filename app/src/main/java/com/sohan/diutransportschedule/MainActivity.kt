@@ -1306,6 +1306,7 @@ private fun scheduleNextAlarmFromData(
     val intent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
         putExtra(MainActivity.EXTRA_TITLE, firstTitle)
         putExtra(MainActivity.EXTRA_TEXT, firstText)
+        putExtra(com.sohan.diutransportschedule.EXTRA_AT_MS, firstMs)
     }
 
     val pi = PendingIntent.getBroadcast(

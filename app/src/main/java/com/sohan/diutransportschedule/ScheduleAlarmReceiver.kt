@@ -40,6 +40,11 @@ import android.util.Log
 private const val ACTION_STOP_RUNNING_ALERT_INTERNAL = "com.sohan.diutransportschedule.ACTION_STOP_RUNNING_ALERT_INTERNAL"
 private const val ALERT_STOP_REQ_CODE = 9077
 
+const val EXTRA_AT_MS = "com.sohan.diutransportschedule.EXTRA_AT_MS"
+private const val DEDUPE_PREFS = "alarm_dedupe_prefs"
+private const val KEY_LAST_AT_MS = "last_at_ms"
+private const val KEY_LAST_WALL_MS = "last_wall_ms"
+
 private object RunningAlertController {
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
@@ -159,11 +164,22 @@ private object RunningAlertController {
 class ScheduleAlarmReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        // Stop button: stop ONLY the currently running sound/vibration + hide current notification
+        // Stop action: stop ONLY the currently running sound/vibration + hide current notification
         // (do NOT cancel future alarms)
         if (intent.action == ACTION_STOP_SCHEDULE_ALARM) {
             RunningAlertController.stop(context)
             NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+
+            // If user tapped the notification body, we still want to open the app
+            // but stop ONLY this running alert.
+            if (intent.getBooleanExtra("open_app", false)) {
+                val launch = context.packageManager
+                    .getLaunchIntentForPackage(context.packageName)
+                    ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP) }
+                if (launch != null) {
+                    try { context.startActivity(launch) } catch (_: Throwable) {}
+                }
+            }
             return
         }
 
@@ -173,6 +189,24 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             return
         }
         Log.d("ScheduleAlarmReceiver", "onReceive action=${intent.action} title=${intent.getStringExtra(EXTRA_TITLE)} text=${intent.getStringExtra(EXTRA_TEXT)}")
+
+        // --- De-dupe: some devices/OS versions may deliver the same alarm twice ---
+        // We tag each scheduled alarm with its atMs and ignore repeats within a short window.
+        val firedAtMs = intent.getLongExtra(EXTRA_AT_MS, -1L)
+        if (firedAtMs > 0L) {
+            val nowWall = System.currentTimeMillis()
+            val dp = context.getSharedPreferences(DEDUPE_PREFS, Context.MODE_PRIVATE)
+            val lastAt = dp.getLong(KEY_LAST_AT_MS, -1L)
+            val lastWall = dp.getLong(KEY_LAST_WALL_MS, 0L)
+            if (lastAt == firedAtMs && (nowWall - lastWall) < 15_000L) {
+                Log.w("ScheduleAlarmReceiver", "Duplicate alarm delivery ignored atMs=$firedAtMs")
+                return
+            }
+            dp.edit()
+                .putLong(KEY_LAST_AT_MS, firedAtMs)
+                .putLong(KEY_LAST_WALL_MS, nowWall)
+                .apply()
+        }
 
         val rawTitle = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "DIU Bus Reminder" }
         val rawText = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { "Bus reminder" }
@@ -224,20 +258,21 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         val collapsedTitle = if (timeToken.isNotBlank()) "DIU Bus Reminder • $timeToken" else "DIU Bus Reminder"
 
-        // Tap opens the app
-        val openIntent = context.packageManager
-            .getLaunchIntentForPackage(context.packageName)
-            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP) }
+        // Tap on the notification body: stop ONLY this running alert + open the app.
+        // We route the tap through this receiver so we can stop sound/vibration reliably.
+        val tapIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
+            action = ACTION_STOP_SCHEDULE_ALARM
+            data = Uri.parse("diu://tap_stop_open")
+            putExtra("open_app", true)
+        }
 
-        val contentPi = if (openIntent != null) {
-            PendingIntent.getActivity(
-                context,
-                9101,
-                openIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or
-                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-            )
-        } else null
+        val contentPi = PendingIntent.getBroadcast(
+            context,
+            ALARM_REQ_CODE + 21,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
 
         // Stop action
         val stopIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
@@ -298,14 +333,13 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
+            .setSilent(true)
 
-        if (contentPi != null) builder.setContentIntent(contentPi)
+        builder.setContentIntent(contentPi)
 
-        // Pre-O only: allow per-notification sound/vibration
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            if (soundOn) builder.setDefaults(NotificationCompat.DEFAULT_SOUND)
-            if (vibrateOn) builder.setVibrate(longArrayOf(0, 500, 250, 900, 250, 500, 400, 1200))
-        }
+        // NOTE: Don't let the Notification itself play sound/vibration.
+        // We always drive sound/vibration via RunningAlertController so the user toggles work
+        // AND so we don't get double-ringtone (channel sound + manual ringtone).
 
         NotificationManagerCompat.from(context).notify(ALARM_REQ_CODE, builder.build())
 
@@ -381,6 +415,7 @@ private fun scheduleNextFromStoredQueue(context: Context) {
     val intent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
         putExtra(MainActivity.EXTRA_TITLE, next.title)
         putExtra(MainActivity.EXTRA_TEXT, next.text)
+        putExtra(EXTRA_AT_MS, next.atMs)
     }
 
     val pi = PendingIntent.getBroadcast(
@@ -426,5 +461,5 @@ private fun scheduleNextFromStoredQueue(context: Context) {
         }
     }
 
-    Log.d("ScheduleAlarmReceiver", "Scheduled NEXT alarm from queue atMs=${next.atMs}")
+    Log.d("ScheduleAlarmReceiver", "Scheduled NEXT alarm from queue atMs=${next.atMs} title=${next.title}")
 }
