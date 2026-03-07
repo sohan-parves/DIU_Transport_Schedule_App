@@ -7,7 +7,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,20 +20,37 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sohan.diutransportschedule.ui.theme.PrimaryBlue
 import androidx.compose.ui.draw.shadow
-
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 
 enum class BottomTab(val label: String) {
     HOME("Home"),
+    MAP("Map"),
     NOTICE("Notice"),
     PROFILE("Profile")
 }
-
+private data class BottomTabUi(
+    val tab: BottomTab,
+    val label: String,
+    val icon: ImageVector
+)
 @Composable
 fun PremiumBottomBar(
     selected: BottomTab,
     onSelect: (BottomTab) -> Unit
 ) {
-    // floating bar padding
+    val tabs = listOf(
+        BottomTabUi(BottomTab.HOME, "Home", Icons.Filled.Home),
+        BottomTabUi(BottomTab.MAP, "Map", Icons.Filled.LocationOn),
+        BottomTabUi(BottomTab.NOTICE, "Notice", Icons.Filled.Notifications),
+        BottomTabUi(BottomTab.PROFILE, "Settings", Icons.Filled.Settings)
+    )
+
+    val selectedIndex = tabs.indexOfFirst { it.tab == selected }.coerceAtLeast(0)
+    val slotCount = tabs.size
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -41,11 +58,13 @@ fun PremiumBottomBar(
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Surface(
-            modifier = Modifier.shadow(
-                elevation = 22.dp,
-                shape = RoundedCornerShape(22.dp),
-                clip = false
-            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .shadow(
+                    elevation = 22.dp,
+                    shape = RoundedCornerShape(22.dp),
+                    clip = false
+                ),
             shape = RoundedCornerShape(22.dp),
             tonalElevation = 2.dp,
             shadowElevation = 0.dp,
@@ -56,32 +75,123 @@ fun PremiumBottomBar(
                     .fillMaxWidth()
                     .height(64.dp)
                     .padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                PremiumTabItem(
-                    icon = { Icon(Icons.Filled.Home, contentDescription = null) },
-                    label = "Home",
-                    selected = selected == BottomTab.HOME,
-                    onClick = { onSelect(BottomTab.HOME) }
+                tabs.forEachIndexed { index, item ->
+                    val hiddenAlpha by animateFloatAsState(
+                        targetValue = if (selectedIndex == index) 0f else 1f,
+                        label = "tabAlpha"
+                    )
+                    val hiddenScale by animateFloatAsState(
+                        targetValue = if (selectedIndex == index) 0.92f else 1f,
+                        label = "tabScale"
+                    )
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .graphicsLayer {
+                                alpha = hiddenAlpha
+                                scaleX = hiddenScale
+                                scaleY = hiddenScale
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (hiddenAlpha > 0.01f) {
+                            PremiumTabItem(
+                                icon = { Icon(item.icon, contentDescription = null) },
+                                label = item.label,
+                                selected = false,
+                                onClick = { onSelect(item.tab) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .matchParentSize()
+                .padding(horizontal = 10.dp)
+                .offset(y = (-12).dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            repeat(slotCount) { index ->
+                val item = tabs[index]
+                val selectedAlpha by animateFloatAsState(
+                    targetValue = if (selectedIndex == index) 1f else 0f,
+                    label = "selectedTabAlpha"
                 )
-                PremiumTabItem(
-                    icon = { Icon(Icons.Filled.Notifications, contentDescription = null) },
-                    label = "Notice",
-                    selected = selected == BottomTab.NOTICE,
-                    onClick = { onSelect(BottomTab.NOTICE) }
+                val selectedScale by animateFloatAsState(
+                    targetValue = if (selectedIndex == index) 1f else 0.88f,
+                    label = "selectedTabScale"
                 )
-                PremiumTabItem(
-                    icon = { Icon(Icons.Filled.Person, contentDescription = null) },
-                    label = "Profile",
-                    selected = selected == BottomTab.PROFILE,
-                    onClick = { onSelect(BottomTab.PROFILE) }
+                val selectedYOffset by animateDpAsState(
+                    targetValue = if (selectedIndex == index) 0.dp else 10.dp,
+                    label = "selectedTabYOffset"
                 )
+
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.TopCenter
+                ) {
+                    if (selectedAlpha > 0.01f) {
+                        Box(
+                            modifier = Modifier
+                                .offset(y = selectedYOffset)
+                                .graphicsLayer {
+                                    alpha = selectedAlpha
+                                    scaleX = selectedScale
+                                    scaleY = selectedScale
+                                }
+                        ) {
+                            FloatingSelectedTabButton(
+                                icon = item.icon,
+                                label = item.label,
+                                onClick = { onSelect(item.tab) }
+                            )
+                        }
+                    }
+                }
             }
         }
     }
 }
+@Composable
+private fun FloatingSelectedTabButton(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    val scale by animateFloatAsState(targetValue = 1f, label = "floatingTabScale")
 
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .size(58.dp)
+            .shadow(
+                elevation = 14.dp,
+                shape = RoundedCornerShape(29.dp),
+                clip = false
+            ),
+        shape = RoundedCornerShape(29.dp),
+        color = Color(0xFF00C853),
+        tonalElevation = 4.dp
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size((26 * scale).dp)
+            )
+        }
+    }
+}
 @Composable
 private fun PremiumTabItem(
     icon: @Composable () -> Unit,
@@ -118,26 +228,17 @@ private fun PremiumTabItem(
                         shape = RoundedCornerShape(18.dp)
                     )
             } else Modifier
+        ) {Box(
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = pad),
+            contentAlignment = Alignment.Center
         ) {
-            Row(
-                modifier = Modifier
-                    .padding(horizontal = 14.dp, vertical = pad),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            CompositionLocalProvider(
+                LocalContentColor provides contentColor
             ) {
-                CompositionLocalProvider(
-                    LocalContentColor provides contentColor
-                ) {
-                    icon()
-                }
-
-                Text(
-                    text = label,
-                    color = contentColor,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
-                )
+                icon()
             }
+        }
         }
     }
 }

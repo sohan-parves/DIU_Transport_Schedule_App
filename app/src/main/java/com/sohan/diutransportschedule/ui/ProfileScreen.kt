@@ -68,29 +68,25 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.ui.platform.LocalContext
 import android.content.Context
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(vm: HomeViewModel) {
     val dark by vm.darkMode.collectAsState()
     val selectedRoute by vm.selectedRoute.collectAsState()
+    val isFriday = java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
 
-    // ✅ First install default: route = ALL -> notifications must be OFF.
-    // ✅ Any specific route selected -> notifications auto ON.
+    // Keep ALL persisted as OFF. Friday should only force a temporary OFF without overwriting saved preference.
     LaunchedEffect(selectedRoute) {
         val isAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
-        if (isAll) {
-            if (vm.notificationsEnabled.value) {
-                vm.setNotificationsEnabled(false)
-            } else {
-                // still ensure persisted OFF on first install
-                vm.setNotificationsEnabled(false)
-            }
-        } else {
-            // auto-enable when user selects a real route
-            if (!vm.notificationsEnabled.value) {
-                vm.setNotificationsEnabled(true)
-            }
+        if (isAll && vm.notificationsEnabled.value) {
+            vm.setNotificationsEnabled(false)
+        } else if (isAll) {
+            vm.setNotificationsEnabled(false)
         }
     }
 
@@ -102,6 +98,7 @@ fun ProfileScreen(vm: HomeViewModel) {
     val secondaryText = if (dark) Color.White.copy(alpha = 0.88f) else MaterialTheme.colorScheme.onSurfaceVariant
     val view = LocalView.current
     val notificationsEnabled by vm.notificationsEnabled.collectAsState()
+    val effectiveNotificationsEnabled = notificationsEnabled && !isFriday && !selectedRoute.trim().equals("ALL", ignoreCase = true)
     val notifyLeadMinutes by vm.notifyLeadMinutes.collectAsState()
     val navBarBottomPad = with(LocalDensity.current) {
         val bottomPx = runCatching {
@@ -112,6 +109,7 @@ fun ProfileScreen(vm: HomeViewModel) {
         bottomPx.toDp()
     }
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val alertPrefs = remember(ctx) { ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE) }
 
@@ -141,6 +139,13 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val showUpdateBanner by vm.showUpdateBanner.collectAsState()
     val compactMode by vm.compactMode.collectAsState()
+    var showReloadPopup by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(isSyncing) {
+        if (!isSyncing) {
+            showReloadPopup = false
+        }
+    }
 
 
     Surface(
@@ -148,6 +153,43 @@ fun ProfileScreen(vm: HomeViewModel) {
         color = MaterialTheme.colorScheme.background
     ) {
         val scrollState = rememberScrollState()
+        if (showReloadPopup || isSyncing) {
+            Dialog(
+                onDismissRequest = { },
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false
+                )
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(22.dp),
+                    tonalElevation = 6.dp,
+                    shadowElevation = 12.dp,
+                    color = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        CircularProgressIndicator()
+
+                        Text(
+                            text = "Reloading latest data...",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = primaryText,
+                            fontWeight = FontWeight.SemiBold
+                        )
+
+                        Text(
+                            text = "Please wait a moment",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = secondaryText
+                        )
+                    }
+                }
+            }
+        }
 
         Column(
             modifier = Modifier
@@ -213,6 +255,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                         IconButton(
                             onClick = {
                                 lastRefreshTapMs = System.currentTimeMillis()
+                                showReloadPopup = true
                                 vm.refresh(showBannerIfUpdated = true)
                             },
                             enabled = canTapRefresh,
@@ -263,9 +306,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                         ) {
                             val dailyRouteOptions = routeOptions.filter { opt ->
                                 val rn = opt.routeNo.trim()
-                                rn.isNotBlank() &&
-                                        !rn.equals("ALL", ignoreCase = true) &&   // ✅ remove ALL
-                                        !rn.startsWith("F", ignoreCase = true)
+                                rn.isNotBlank() && !rn.startsWith("F", ignoreCase = true)
                             }
 
                             dailyRouteOptions.forEachIndexed { index, opt ->
@@ -306,7 +347,11 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 Spacer(Modifier.size(2.dp))
 
                                                 Text(
-                                                    text = opt.routeNo,
+                                                    text = if (opt.routeNo.trim().equals("ALL", ignoreCase = true)) {
+                                                        "All"
+                                                    } else {
+                                                        opt.routeNo.trim()
+                                                    },
                                                     style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                                                     color = if (isSelected)
                                                         if (dark) MaterialTheme.colorScheme.secondary
@@ -332,7 +377,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 Spacer(Modifier.size(6.dp))
 
                                                 Text(
-                                                    text = opt.label,
+                                                    text = compactRouteOptionLabel(opt.routeNo, opt.label),
                                                     style = if (isSelected)
                                                         MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
                                                     else
@@ -351,15 +396,26 @@ fun ProfileScreen(vm: HomeViewModel) {
                                     onClick = {
                                         routeMenuExpanded = false
                                         vm.setSelectedRoute(opt.routeNo)
-
-                                        // If user picks ALL (only possible if ALL exists), force notifications OFF.
-                                        // If user picks a real route, auto-enable notifications.
-                                        val picked = opt.routeNo.trim()
-                                        if (picked.equals("ALL", ignoreCase = true)) {
-                                            vm.setNotificationsEnabled(false)
-                                        } else {
-                                            vm.setNotificationsEnabled(true)
+                                        // Save selected road for LiveMap (Map tab)
+                                        val rid = opt.routeNo.trim()
+                                        val fullRoadText = buildString {
+                                            append(opt.routeNo.trim())
+                                            val compactLabel = compactRouteOptionLabel(opt.routeNo, opt.label)
+                                            if (compactLabel.isNotBlank()) {
+                                                append(" — ")
+                                                append(compactLabel)
+                                            }
                                         }
+                                        scope.launch {
+                                            SelectedRoadStore.save(ctx, rid, fullRoadText)
+                                        }
+
+                                // If user picks ALL, persist notifications OFF.
+                                // Friday OFF is temporary in UI only; do not overwrite saved preference.
+                                val picked = opt.routeNo.trim()
+                                if (picked.equals("ALL", ignoreCase = true)) {
+                                    vm.setNotificationsEnabled(false)
+                                }
                                     },
                                     modifier = Modifier.fillMaxWidth()
                                 )
@@ -510,7 +566,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                             )
                         }
                         Switch(
-                            checked = notificationsEnabled,
+                            checked = effectiveNotificationsEnabled,
                             onCheckedChange = { enabled ->
                                 vm.setNotificationsEnabled(enabled)
 
@@ -525,12 +581,12 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         .apply()
                                 }
                             },
-                            enabled = true,
+                            enabled = !isFriday && !selectedRoute.trim().equals("ALL", ignoreCase = true),
                             colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                         )
                     }
 
-                    AnimatedVisibility(visible = notificationsEnabled) {
+                    AnimatedVisibility(visible = effectiveNotificationsEnabled) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text(
                                 text = "Notify me ${notifyLeadMinutes} minutes before",
@@ -557,7 +613,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                             )
                         }
                     }
-                    AnimatedVisibility(visible = notificationsEnabled) {
+                    AnimatedVisibility(visible = effectiveNotificationsEnabled) {
                         Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
                             HorizontalDivider(color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider)
 
@@ -630,6 +686,35 @@ fun ProfileScreen(vm: HomeViewModel) {
             }
         }
     }
+}
+
+private fun compactRouteEndpoints(label: String): String {
+    val clean = label.trim()
+    if (clean.isBlank()) return ""
+
+    val parts = clean
+        .split("->", "→", "<>", "—", "-", "|")
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+
+    return when {
+        parts.isEmpty() -> clean
+        parts.size == 1 -> parts.first()
+        else -> "${parts.first()} → ${parts.last()}"
+    }
+}
+
+private fun compactRouteOptionLabel(routeNo: String, label: String): String {
+    if (routeNo.trim().equals("ALL", ignoreCase = true)) {
+        return "All routes"
+    }
+
+    val compact = compactRouteEndpoints(label)
+    val routeNoTrimmed = routeNo.trim()
+
+    return compact
+        .replace(Regex("\\s*\\(${Regex.escape(routeNoTrimmed)}\\)\\s*$", RegexOption.IGNORE_CASE), "")
+        .trim()
 }
 
 // Compatibility: older Material3 versions may not include ColorScheme.surfaceColorAtElevation

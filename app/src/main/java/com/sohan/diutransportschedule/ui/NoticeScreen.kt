@@ -29,11 +29,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 
 // Firestore Notice (text-only on Spark plan)
 data class AdminNoticeUi(
@@ -44,7 +45,65 @@ data class AdminNoticeUi(
     val releaseAtMs: Long,
     val isRead: Boolean
 )
+private fun readCachedNotices(ctx: Context): List<AdminNoticeUi> {
+    return try {
+        val prefs = ctx.getSharedPreferences("admin_notices_cache", Context.MODE_PRIVATE)
+        val raw = prefs.getString("cached_notices_json", "[]") ?: "[]"
+        val arr = JSONArray(raw)
 
+        buildList {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                add(
+                    AdminNoticeUi(
+                        id = o.optString("id", ""),
+                        title = o.optString("title", "").ifBlank { "Notice" },
+                        body = o.optString("body", ""),
+                        createdAtMs = o.optLong("createdAtMs", 0L),
+                        releaseAtMs = o.optLong("releaseAtMs", o.optLong("createdAtMs", 0L)),
+                        isRead = false
+                    )
+                )
+            }
+        }
+    } catch (_: Throwable) {
+        emptyList()
+    }
+}
+
+private fun saveCachedNotices(ctx: Context, notices: List<AdminNoticeUi>) {
+    try {
+        val prefs = ctx.getSharedPreferences("admin_notices_cache", Context.MODE_PRIVATE)
+        val arr = JSONArray()
+
+        notices.forEach { n ->
+            val o = JSONObject()
+            o.put("id", n.id)
+            o.put("title", n.title)
+            o.put("body", n.body)
+            o.put("createdAtMs", n.createdAtMs)
+            o.put("releaseAtMs", n.releaseAtMs)
+            arr.put(o)
+        }
+
+        prefs.edit()
+            .putString("cached_notices_json", arr.toString())
+            .apply()
+    } catch (_: Throwable) {
+    }
+}
+
+private fun readCachedNoticesVersion(ctx: Context): Long {
+    return ctx.getSharedPreferences("admin_notices_cache", Context.MODE_PRIVATE)
+        .getLong("cached_notices_version", 0L)
+}
+
+private fun saveCachedNoticesVersion(ctx: Context, version: Long) {
+    ctx.getSharedPreferences("admin_notices_cache", Context.MODE_PRIVATE)
+        .edit()
+        .putLong("cached_notices_version", version)
+        .apply()
+}
 private const val PREF_NOTICES = "notice_prefs"
 private const val KEY_READ_IDS = "read_ids" // StringSet
 
@@ -80,7 +139,7 @@ fun NoticeScreen(pad: PaddingValues) {
 
     val db = remember { FirebaseFirestore.getInstance() }
 
-    var notices by remember { mutableStateOf<List<AdminNoticeUi>>(emptyList()) }
+    var notices by remember { mutableStateOf(readCachedNotices(ctx)) }
     var error by remember { mutableStateOf<String?>(null) }
 
     // Keep local read-state
@@ -161,6 +220,7 @@ fun NoticeScreen(pad: PaddingValues) {
 
                 error = null
                 notices = applyReadState(list)
+                saveCachedNotices(ctx, list)
             }
             .addOnFailureListener { e ->
                 error = e.message
@@ -168,28 +228,37 @@ fun NoticeScreen(pad: PaddingValues) {
     }
 
     DisposableEffect(Unit) {
-        // 1) Initial: fetch once on first entry (or if you want always show latest on open)
-        //    We still keep reads low because subsequent updates depend on meta version.
-        if (notices.isEmpty()) {
-            fetchNoticesOnce()
+        // 1) Local cache first: show cached notices immediately with zero notice-doc reads.
+        if (notices.isNotEmpty()) {
+            notices = applyReadState(notices)
         }
 
-        // 2) Version listener: only one tiny document read on changes
-        val savedVersion = readNoticesVersion(ctx)
+        // 2) Version listener: only the tiny meta doc is listened to.
+        var lastSeenVersion = readCachedNoticesVersion(ctx)
         var reg: ListenerRegistration? = null
 
         reg = db.collection("meta")
             .document("notices")
             .addSnapshotListener { snap, e ->
                 if (e != null) {
-                    // Don't block UI; just show error if nothing loaded
                     if (notices.isEmpty()) error = e.message
                     return@addSnapshotListener
                 }
+
                 val remoteVersion = snap?.getLong("version") ?: 0L
-                if (remoteVersion > savedVersion) {
-                    saveNoticesVersion(ctx, remoteVersion)
-                    fetchNoticesOnce()
+
+                when {
+                    remoteVersion > lastSeenVersion -> {
+                        lastSeenVersion = remoteVersion
+                        saveCachedNoticesVersion(ctx, remoteVersion)
+                        saveNoticesVersion(ctx, remoteVersion)
+                        fetchNoticesOnce()
+                    }
+
+                    notices.isEmpty() && lastSeenVersion == 0L && remoteVersion == 0L -> {
+                        // Bootstrap only when there is no cached data and no remote version yet.
+                        fetchNoticesOnce()
+                    }
                 }
             }
 

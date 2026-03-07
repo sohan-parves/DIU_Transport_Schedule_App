@@ -14,8 +14,8 @@ android {
         applicationId = "com.sohan.diutransportschedule"
         minSdk = 30
         targetSdk = 36
-        versionCode = 19
-        versionName = "1.1.9"
+        versionCode = 20
+        versionName = "1.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -121,5 +121,11 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
 
 }

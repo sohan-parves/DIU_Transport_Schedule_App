@@ -48,6 +48,7 @@ fun MainNav(
         bottomBar = {
             PremiumBottomBar(
                 selected = when (currentRoute) {
+                    "map" -> BottomTab.MAP
                     "notice" -> BottomTab.NOTICE
                     "profile" -> BottomTab.PROFILE
                     else -> BottomTab.HOME
@@ -55,6 +56,7 @@ fun MainNav(
                 onSelect = { tab ->
                     val route = when (tab) {
                         BottomTab.HOME -> "home"
+                        BottomTab.MAP -> "map"
                         BottomTab.NOTICE -> "notice"
                         BottomTab.PROFILE -> "profile"
                     }
@@ -72,6 +74,7 @@ fun MainNav(
             startDestination = "home"
         ) {
             composable("home") { HomeScreen(vm = vm, pad = pad) }
+            composable("map") { LiveMapScreen() }
             composable("notice") { NoticeScreen(pad = pad) }
             composable("profile") { ProfileScreen(vm) }
         }

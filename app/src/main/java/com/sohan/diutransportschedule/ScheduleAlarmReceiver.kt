@@ -332,10 +332,12 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setAutoCancel(true)
+            .setAutoCancel(false)
+            .setOngoing(true)
             .setSilent(true)
 
         builder.setContentIntent(contentPi)
+        builder.setFullScreenIntent(contentPi, true)
 
         // NOTE: Don't let the Notification itself play sound/vibration.
         // We always drive sound/vibration via RunningAlertController so the user toggles work
