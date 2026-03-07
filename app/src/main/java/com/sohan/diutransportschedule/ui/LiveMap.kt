@@ -1,4 +1,6 @@
 package com.sohan.diutransportschedule.ui
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MyLocation
 
 import android.location.Geocoder
 import android.os.Build
@@ -113,6 +115,7 @@ private data class CachedRouteMapData(
     val hasRealRoadPolyline: Boolean
 )
 
+
 private object RouteMapMemoryCache {
     private val cache = linkedMapOf<String, CachedRouteMapData>()
 
@@ -124,6 +127,20 @@ private object RouteMapMemoryCache {
 
     fun remove(routeNo: String) {
         cache.remove(routeNo.trim().uppercase())
+    }
+}
+
+private object RouteScheduleMemoryCache {
+    private var cachedEntries: List<Map<*, *>>? = null
+
+    fun get(): List<Map<*, *>>? = cachedEntries
+
+    fun put(entries: List<Map<*, *>>) {
+        cachedEntries = entries
+    }
+
+    fun clear() {
+        cachedEntries = null
     }
 }
 
@@ -391,30 +408,59 @@ fun LiveMapScreen() {
         }
 
         try {
-            val snapshot = firestore
-                .collection("schedules")
-                .document("current")
-                .collection("data")
-                .document("items")
-                .get()
-                .await()
+            val entries = RouteScheduleMemoryCache.get() ?: run {
+                val snapshot = firestore
+                    .collection("schedules")
+                    .document("current")
+                    .collection("data")
+                    .document("items")
+                    .get()
+                    .await()
 
-            val entries = collectRouteEntries(snapshot.data)
+                collectRouteEntries(snapshot.data).also { RouteScheduleMemoryCache.put(it) }
+            }
 
             val wantedRouteNo = normalizedRouteId
             val matched = entries.firstOrNull { entry ->
                 normalizeRouteNo(entry["routeNo"]?.toString().orEmpty()) == wantedRouteNo
             }
 
-            routeDetails = matched?.get("routeDetails")?.toString()?.trim().orEmpty()
-            routeNameFromDb = matched?.get("routeName")?.toString()?.trim().orEmpty()
+            if (matched == null) {
+                routePoints = emptyList()
+                routePointLabels = emptyList()
+                routeStopMarkerPoints = emptyList()
+                routeStopMarkerLabels = emptyList()
+                routeDetails = ""
+                routeNameFromDb = if (routeText.isNotBlank()) {
+                    routeText.substringAfter("—", routeText).trim()
+                } else {
+                    ""
+                }
+                routeHasRealRoadPolyline = false
+                routeLoadError = "Route not found for $routeId (found ${entries.size} route entries)"
+                routeLoading = false
+                return@LaunchedEffect
+            }
+
+            routeDetails = matched.get("routeDetails")?.toString()?.trim().orEmpty()
+            routeNameFromDb = matched.get("routeName")?.toString()?.trim().orEmpty()
             if (routeNameFromDb.isBlank() && routeText.isNotBlank()) {
                 routeNameFromDb = routeText.substringAfter("—", routeText).trim()
             }
 
-            val adminAnchorPolylinePoints = extractGeoPointsFromPolyline(matched?.get("routeRoadPolylineAnchors"))
-            val roadPolylinePoints = extractGeoPointsFromPolyline(matched?.get("routeRoadPolyline"))
-            val stopPoints = extractGeoPointsFromStops(matched?.get("routeStops"))
+            val routeMapSnapshot = firestore
+                .collection("route_maps")
+                .document("current")
+                .collection("routes")
+                .document(wantedRouteNo)
+                .get()
+                .await()
+
+            val routeMapData = routeMapSnapshot.data
+
+            val adminAnchorPolylinePoints = extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolylineAnchors"))
+            val roadPolylinePoints = extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolyline"))
+            val stopPoints = extractGeoPointsFromStops(routeMapData?.get("routeStops"))
             val rawPolylinePoints = extractGeoPointsFromPolyline(matched?.get("routePolyline"))
 
             val useAdminAnchorPolyline = adminAnchorPolylinePoints.isNotEmpty()
@@ -429,8 +475,8 @@ fun LiveMapScreen() {
                 stopPoints.isNotEmpty() -> stopPoints
                 else -> rawPolylinePoints
             }
-            val stopLabelsFromStops = extractStopLabelsFromStops(matched?.get("routeStops"))
-            val stopLabelsFromNames = extractStopLabelsFromStopNames(matched?.get("routeStopNames"))
+            val stopLabelsFromStops = extractStopLabelsFromStops(routeMapData?.get("routeStops"))
+            val stopLabelsFromNames = extractStopLabelsFromStopNames(routeMapData?.get("routeStopNames"))
             val stopLabels = if (stopLabelsFromStops.isNotEmpty()) stopLabelsFromStops else stopLabelsFromNames
             val stopMarkerPoints = when {
                 stopPoints.isNotEmpty() -> stopPoints
@@ -495,7 +541,7 @@ fun LiveMapScreen() {
                     }
                 }
                 else -> {
-                    routeLoadError = "Route details / routePolyline not found for $routeId (found ${entries.size} route entries)"
+                    routeLoadError = "Route details / map data not found for $routeId (found ${entries.size} route entries)"
                     routeLoading = false
                 }
             }
@@ -512,7 +558,7 @@ fun LiveMapScreen() {
 
     fun startDownload() {
         val mapId = "dhaka_transport"
-        val url = "https://tanjirs-shoes.unaux.com/maps/dhaka_transport_${style}.mbtiles"
+        val url = "https://sohanparves.unaux.com/diu/maps/dhaka_transport_${style}.mbtiles"
 
         val req = OneTimeWorkRequestBuilder<MbtilesDownloadWorker>()
             .setInputData(workDataOf("route_id" to mapId, "url" to url, "style" to style))
@@ -556,6 +602,7 @@ fun LiveMapScreen() {
     }
 
     Box(Modifier.fillMaxSize()) {
+        var requestCenterOnUser by remember { mutableStateOf(false) }
         val ready = offlineState as? OfflineState.Ready
 
         // Only start live GPS when the map is ready AND permission is granted
@@ -569,7 +616,9 @@ fun LiveMapScreen() {
             routePointLabels = routePointLabels,
             routeStopMarkerPoints = routeStopMarkerPoints,
             routeStopMarkerLabels = routeStopMarkerLabels,
-            drawRoadLine = routeHasRealRoadPolyline
+            drawRoadLine = routeHasRealRoadPolyline,
+            centerOnUserRequest = requestCenterOnUser,
+            onCenterConsumed = { requestCenterOnUser = false }
         )
         val isDark = androidx.compose.foundation.isSystemInDarkTheme()
         val topCardBg = if (isDark) Color(0xFF0B2A66) else Color.White
@@ -715,6 +764,22 @@ fun LiveMapScreen() {
             onDownload = { startDownload() },
             onRetry = { startDownload() }
         )
+
+        if (ready != null && hasLocationPermission) {
+            FloatingActionButton(
+                onClick = { requestCenterOnUser = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 90.dp),
+                containerColor = Color(0xFF0B2A66)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MyLocation,
+                    contentDescription = "My Location",
+                    tint = Color.White
+                )
+            }
+        }
     }
 }
 
@@ -870,7 +935,9 @@ private fun OsmdroidLiveMap(
     routePointLabels: List<String>,
     routeStopMarkerPoints: List<GeoPoint>,
     routeStopMarkerLabels: List<String>,
-    drawRoadLine: Boolean
+    drawRoadLine: Boolean,
+    centerOnUserRequest: Boolean,
+    onCenterConsumed: () -> Unit
 ){
     val ctx = LocalContext.current
     LaunchedEffect(Unit) {
@@ -879,6 +946,7 @@ private fun OsmdroidLiveMap(
 
     val fused = remember { LocationServices.getFusedLocationProviderClient(ctx) }
     var locationCallback by remember { mutableStateOf<LocationCallback?>(null) }
+    var lastUserLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var hasFittedRoute by remember(routeId, routeText) { mutableStateOf(false) }
 
     AndroidView(
@@ -998,9 +1066,7 @@ private fun OsmdroidLiveMap(
                             val loc = result.lastLocation ?: return
                             val p = GeoPoint(loc.latitude, loc.longitude)
                             marker.position = p
-                            if (routePoints.isEmpty()) {
-                                map.controller.animateTo(p)
-                            }
+                            lastUserLocation = p
                             map.invalidate()
                         }
                     }
@@ -1017,10 +1083,18 @@ private fun OsmdroidLiveMap(
                 }
                 locationCallback = null
             }
+
+            if (centerOnUserRequest) {
+                lastUserLocation?.let {
+                    map.controller.animateTo(it)
+                }
+                onCenterConsumed()
+            }
         }
     )
 
     // Map screen leave করলে location off (আপনার requirement)
+
     DisposableEffect(Unit) {
         onDispose {
             locationCallback?.let {

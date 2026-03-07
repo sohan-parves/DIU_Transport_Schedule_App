@@ -1,6 +1,7 @@
 package com.sohan.diutransportschedule
 
 import android.media.Ringtone
+import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
@@ -27,6 +28,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import com.sohan.diutransportschedule.MainActivity.Companion.ACTION_STOP_SCHEDULE_ALARM
 import com.sohan.diutransportschedule.MainActivity.Companion.ALARM_REQ_CODE
 import com.sohan.diutransportschedule.MainActivity.Companion.EXTRA_TEXT
@@ -44,9 +46,17 @@ const val EXTRA_AT_MS = "com.sohan.diutransportschedule.EXTRA_AT_MS"
 private const val DEDUPE_PREFS = "alarm_dedupe_prefs"
 private const val KEY_LAST_AT_MS = "last_at_ms"
 private const val KEY_LAST_WALL_MS = "last_wall_ms"
+private const val KEY_LAST_FP = "last_fp"
+private const val KEY_LAST_FP_WALL_MS = "last_fp_wall_ms"
+private const val NOTICE_ALERT_PREFS = "notice_alert_prefs"
+private const val KEY_ALARM_SOUND_5M = "alarm_sound_5m"
+private const val KEY_ALARM_VIBRATE_5M = "alarm_vibrate_5m"
+private const val KEY_CUSTOM_RINGTONE_URI = "custom_ringtone_uri"
+private const val KEY_CUSTOM_RINGTONE_NAME = "custom_ringtone_name"
 
 private object RunningAlertController {
     private var ringtone: Ringtone? = null
+    private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var vibrating = false
 
@@ -55,6 +65,15 @@ private object RunningAlertController {
             ringtone?.stop()
         } catch (_: Throwable) {
         }
+        try {
+            mediaPlayer?.stop()
+        } catch (_: Throwable) {
+        }
+        try {
+            mediaPlayer?.release()
+        } catch (_: Throwable) {
+        }
+        mediaPlayer = null
         ringtone = null
 
         try {
@@ -91,15 +110,44 @@ private object RunningAlertController {
 
         if (soundOn) {
             try {
-                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                val r = RingtoneManager.getRingtone(context.applicationContext, uri)
-                ringtone = r
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    r.isLooping = true
+                val prefs = context.getSharedPreferences(NOTICE_ALERT_PREFS, Context.MODE_PRIVATE)
+                val customUri = prefs.getString(KEY_CUSTOM_RINGTONE_URI, null)
+                if (!customUri.isNullOrBlank()) {
+                    val mp = MediaPlayer().apply {
+                        setDataSource(context.applicationContext, Uri.parse(customUri))
+                        isLooping = true
+                        setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ALARM)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                .build()
+                        )
+                        prepare()
+                        start()
+                    }
+                    mediaPlayer = mp
+                } else {
+                    val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    val r = RingtoneManager.getRingtone(context.applicationContext, uri)
+                    ringtone = r
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        r.isLooping = true
+                    }
+                    r.play()
                 }
-                r.play()
             } catch (t: Throwable) {
                 Log.e("ScheduleAlarmReceiver", "Failed to play ringtone", t)
+                try {
+                    val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    val r = RingtoneManager.getRingtone(context.applicationContext, uri)
+                    ringtone = r
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        r.isLooping = true
+                    }
+                    r.play()
+                } catch (fallback: Throwable) {
+                    Log.e("ScheduleAlarmReceiver", "Fallback default ringtone also failed", fallback)
+                }
             }
         }
 
@@ -211,11 +259,24 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         val rawTitle = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { "DIU Bus Reminder" }
         val rawText = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { "Bus reminder" }
         Log.d("ScheduleAlarmReceiver", "Alarm fired title=$rawTitle text=$rawText")
+        val nowWall2 = System.currentTimeMillis()
+        val fp = "$rawTitle|$rawText"
+        val fpPrefs = context.getSharedPreferences(DEDUPE_PREFS, Context.MODE_PRIVATE)
+        val lastFp = fpPrefs.getString(KEY_LAST_FP, null)
+        val lastFpWall = fpPrefs.getLong(KEY_LAST_FP_WALL_MS, 0L)
+        if (lastFp == fp && (nowWall2 - lastFpWall) < 15_000L) {
+            Log.w("ScheduleAlarmReceiver", "Duplicate alarm content ignored fp=$fp")
+            return
+        }
+        fpPrefs.edit()
+            .putString(KEY_LAST_FP, fp)
+            .putLong(KEY_LAST_FP_WALL_MS, nowWall2)
+            .apply()
 
         // User toggles (Profile screen writes these)
-        val prefs = context.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
-        val soundOn = prefs.getBoolean("alarm_sound_5m", true)
-        val vibrateOn = prefs.getBoolean("alarm_vibrate_5m", true)
+        val prefs = context.getSharedPreferences(NOTICE_ALERT_PREFS, Context.MODE_PRIVATE)
+        val soundOn = prefs.getBoolean(KEY_ALARM_SOUND_5M, true)
+        val vibrateOn = prefs.getBoolean(KEY_ALARM_VIBRATE_5M, true)
 
         // ✅ pick channel based on toggles (Android 8+ channel overrides notification sound/vib)
         val channelId = when {
@@ -316,16 +377,16 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setColorized(true)
             .setColor(COLOR_DEEP_BLUE)   // deep blue base
             .setLargeIcon(largeLogo)          // ✅ left logo
+            .setContentTitle(titleLine)
             // Collapsed view
             .setContentTitle(collapsedTitle)
-            .setContentText(destLine)
+            .setContentText(if (timeToken.isNotBlank()) "Time: $timeToken" else destLine)
             // Expanded view
             .setStyle(
-                NotificationCompat.BigTextStyle()
-                    .setBigContentTitle(titleLine)
-                    .bigText(bigBody)
-                    .setSummaryText(" ")
+                MediaNotificationCompat.MediaStyle()
+                    .setShowActionsInCompactView(0)
             )
+            .setSubText(destLine)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(true)                // ✅ time hide হবে না
             .addAction(stopAction)
@@ -334,10 +395,12 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(false)
             .setOngoing(true)
-            .setSilent(true)
+            .setOnlyAlertOnce(true)
 
         builder.setContentIntent(contentPi)
-        builder.setFullScreenIntent(contentPi, true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            builder.setFullScreenIntent(contentPi, true)
+        }
 
         // NOTE: Don't let the Notification itself play sound/vibration.
         // We always drive sound/vibration via RunningAlertController so the user toggles work
@@ -391,7 +454,7 @@ private fun scheduleNextFromStoredQueue(context: Context) {
     val nowMs = System.currentTimeMillis()
     val all = parseQueue(raw)
         .filter { it.atMs > nowMs - 2_000L } // keep near-future items; tolerate small clock drift
-        .distinctBy { it.atMs }
+        .distinctBy { "${it.atMs}|${it.title}|${it.text}" }
         .sortedBy { it.atMs }
 
     if (all.isEmpty()) {
@@ -401,7 +464,7 @@ private fun scheduleNextFromStoredQueue(context: Context) {
     }
 
     // The first item is the one that just fired (or already due). Drop all <= now.
-    val remaining = all.filter { it.atMs > nowMs }
+    val remaining = all.filter { it.atMs > nowMs + 1_000L }
 
     // Persist remaining queue
     val newRaw = remaining.joinToString("\n") { "${it.atMs}|${it.title.replace("|", " ")}|${it.text.replace("|", " ")}" }
