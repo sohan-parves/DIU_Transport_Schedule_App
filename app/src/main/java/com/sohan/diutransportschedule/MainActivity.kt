@@ -1191,7 +1191,21 @@ private fun scheduleNextAlarmFromData(
         "RouteNotificationScheduler",
         "scheduleNextAlarmFromData called: selectedRoute=$selectedRoute leadMinutes=$leadMinutes items=${items.size}"
     )
+    // Route guard: always use latest selected route from Profile
+    val routeGuardPrefs = context.getSharedPreferences("alarm_route_guard_prefs", Context.MODE_PRIVATE)
+    val selectedRouteGuard = routeGuardPrefs
+        .getString("selected_route", selectedRoute)
+        .orEmpty()
+        .trim()
 
+    val effectiveSelectedRoute =
+        if (selectedRouteGuard.isNotBlank()) selectedRouteGuard else selectedRoute
+
+    fun routeMatchesSelected(routeNo: String): Boolean {
+        val wanted = effectiveSelectedRoute.trim()
+        if (wanted.isBlank() || wanted.equals("ALL", ignoreCase = true)) return true
+        return routeNo.trim().equals(wanted, ignoreCase = true)
+    }
     // ---- Permission checks ----
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         val granted = ContextCompat.checkSelfPermission(
@@ -1221,21 +1235,21 @@ private fun scheduleNextAlarmFromData(
         val routeNo = any.readStringProp("routeNo")
         val routeName = any.readStringProp("routeName")
 
-        val match = routeMatchesSelection(routeNo, routeName, selectedRoute)
+        val match = routeMatchesSelection(routeNo, routeName, effectiveSelectedRoute)
         if (match) {
             Log.d(
                 "RouteNotificationScheduler",
-                "Matched route: routeNo=$routeNo routeName=$routeName selectedRoute=$selectedRoute"
+                "Matched route: routeNo=$routeNo routeName=$routeName selectedRoute=$effectiveSelectedRoute"
             )
         }
         match
     }
 
     if (filtered.isEmpty()) {
-        Log.w("RouteNotificationScheduler", "No rows matched selectedRoute=$selectedRoute")
+        Log.w("RouteNotificationScheduler", "No rows matched selectedRoute=$effectiveSelectedRoute")
         return
     }
-    Log.d("RouteNotificationScheduler", "Matched rows count=${filtered.size} for selectedRoute=$selectedRoute")
+    Log.d("RouteNotificationScheduler", "Matched rows count=${filtered.size} for selectedRoute=$effectiveSelectedRoute")
 
     val now = LocalDateTime.now()
     val zone = ZoneId.systemDefault()
@@ -1243,7 +1257,8 @@ private fun scheduleNextAlarmFromData(
     val upcoming = mutableListOf<Triple<Long, String, String>>()
 
     for (any in filtered) {
-        val routeNo = any.readFirstStringProp("routeNo", "route_no", "route", "routeId").ifBlank { selectedRoute }
+        val rawRouteNo = any.readFirstStringProp("routeNo", "route_no", "route", "routeId").trim()
+        val routeNo = rawRouteNo.ifBlank { effectiveSelectedRoute.trim() }
         val routeName = any.readFirstStringProp("routeName", "route_name", "name", "title").ifBlank { "DIU Route" }
 
         val startTimes = any.readFirstStringListProp("startTimes", "start_times", "startTime", "start_time")
@@ -1266,7 +1281,11 @@ private fun scheduleNextAlarmFromData(
             val fireAt = next.minusMinutes(leadMinutes.toLong())
             if (fireAt.isAfter(now)) {
                 val fireMs = fireAt.atZone(zone).toInstant().toEpochMilli()
-                val title = "DIU Bus Reminder • $routeNo"
+                val title = if (routeNo.isNotBlank()) {
+                    "DIU Bus Reminder • $routeNo"
+                } else {
+                    "DIU Bus Reminder"
+                }
                 val text =
                     "$routeName at ${formatTime(next.toLocalTime())} (lead ${leadMinutes}m)"
                 upcoming.add(Triple(fireMs, title, text))
@@ -1285,6 +1304,10 @@ private fun scheduleNextAlarmFromData(
     }
 
     val queue = upcoming
+        .filter { (_, title, _) ->
+            val queuedRoute = title.substringAfter('•', missingDelimiterValue = "").trim()
+            routeMatchesSelected(queuedRoute)
+        }
         .distinctBy { it.first }
         .sortedBy { it.first }
         .take(60)

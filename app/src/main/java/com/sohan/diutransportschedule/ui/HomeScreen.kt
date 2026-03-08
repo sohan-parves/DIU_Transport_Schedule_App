@@ -1826,26 +1826,50 @@ private fun NoticePopupWatcher() {
         postNoticeNotification(ctx, title, body)
     }
 
-    // ✅ A) Firestore: listen latest notice (app open থাকলে সাথে সাথে popup)
+    // ✅ A) Firestore low-read: listen only to tiny meta/notices version,
+    // then fetch the newest notice once only when version changes.
     DisposableEffect(ctx) {
         val db = FirebaseFirestore.getInstance()
+        val prefs = ctx.getSharedPreferences("notice_popup_gate", Context.MODE_PRIVATE)
+        val versionPrefs = ctx.getSharedPreferences("notice_popup_version", Context.MODE_PRIVATE)
+        val lastVersionKey = "last_notice_version"
+        var lastSeenVersion = versionPrefs.getLong(lastVersionKey, 0L)
 
-        val reg = db.collection("notices")
-            .orderBy("createdAtMs", Query.Direction.DESCENDING)
-            .limit(1)
+        fun fetchLatestNoticeOnce() {
+            db.collection("notices")
+                .orderBy("createdAtMs", Query.Direction.DESCENDING)
+                .limit(1)
+                .get()
+                .addOnSuccessListener { snap ->
+                    val d = snap.documents.firstOrNull() ?: return@addOnSuccessListener
+
+                    val id = d.id
+                    val t = d.getString("title").orEmpty().ifBlank { "Transport Notice" }
+                    val b = d.getString("body").orEmpty()
+                        .ifBlank { d.getString("extractedText").orEmpty() }
+                    val ts = d.getLong("releaseAtMs") ?: (d.getLong("createdAtMs") ?: 0L)
+
+                    maybeShow(id = id, t = t, b = b, ts = ts)
+                }
+        }
+
+        val reg = db.collection("meta")
+            .document("notices")
             .addSnapshotListener { snap, e ->
                 if (e != null) return@addSnapshotListener
-                val d = snap?.documents?.firstOrNull() ?: return@addSnapshotListener
 
-                val id = d.id
-                val t = d.getString("title").orEmpty().ifBlank { "Transport Notice" }
-                val b = d.getString("body").orEmpty()
-                    .ifBlank { d.getString("extractedText").orEmpty() }
-
-                // Prefer releaseAtMs (admin-set) else createdAtMs
-                val ts = d.getLong("releaseAtMs") ?: (d.getLong("createdAtMs") ?: 0L)
-
-                maybeShow(id = id, t = t, b = b, ts = ts)
+                val remoteVersion = snap?.getLong("version") ?: 0L
+                when {
+                    remoteVersion > lastSeenVersion -> {
+                        lastSeenVersion = remoteVersion
+                        versionPrefs.edit().putLong(lastVersionKey, remoteVersion).apply()
+                        fetchLatestNoticeOnce()
+                    }
+                    remoteVersion == 0L && lastSeenVersion == 0L && (prefs.getString("last_shown_id", "") ?: "").isBlank() -> {
+                        // Bootstrap only once for first install / empty local state
+                        fetchLatestNoticeOnce()
+                    }
+                }
             }
 
         onDispose { reg.remove() }

@@ -861,16 +861,19 @@ private fun createRouteStopMarkerBitmap(
     label: String
 ): Bitmap {
     val density = ctx.resources.displayMetrics.density
-    val pinWidth = (34f * density).toInt()
-    val pinHeight = (34f * density).toInt()
+    val pinWidth = (44f * density).toInt()
+    val pinHeight = (48f * density).toInt()
     val bubblePadH = 10f * density
     val bubblePadV = 6f * density
     val bubbleRadius = 12f * density
-    val bubbleGap = 4f * density
-    val shadowBlur = 8f * density
-    val shadowDy = 2f * density
+    val bubbleGap = 6f * density
+    val shadowBlur = 10f * density
+    val shadowDy = 3f * density
     val textSize = 13f * density
     val minBubbleWidth = 84f * density
+    val baseShadowHeight = 8f * density
+    val baseShadowWidthExtra = 18f * density
+    val pinLift = 6f * density
 
     val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.parseColor("#111111")
@@ -887,8 +890,8 @@ private fun createRouteStopMarkerBitmap(
     val textHeight = textPaint.fontMetrics.run { bottom - top }
     val bubbleHeight = textHeight + bubblePadV * 2
 
-    val totalWidth = max(bubbleWidth, pinWidth.toFloat()).toInt() + (12f * density).toInt()
-    val totalHeight = (bubbleHeight + bubbleGap + pinHeight + shadowBlur * 2).toInt()
+    val totalWidth = max(bubbleWidth, pinWidth.toFloat()).toInt() + (24f * density).toInt()
+    val totalHeight = (bubbleHeight + bubbleGap + pinHeight + baseShadowHeight + pinLift + shadowBlur * 2).toInt()
 
     val bitmap = Bitmap.createBitmap(totalWidth, totalHeight, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
@@ -898,9 +901,22 @@ private fun createRouteStopMarkerBitmap(
     val bubbleRight = bubbleLeft + bubbleWidth
     val bubbleBottom = bubbleTop + bubbleHeight
 
+    val baseShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(55, 0, 0, 0)
+        maskFilter = android.graphics.BlurMaskFilter(10f * density, android.graphics.BlurMaskFilter.Blur.NORMAL)
+    }
+
+    val baseShadowRect = RectF(
+        (totalWidth - (pinWidth + baseShadowWidthExtra)) / 2f,
+        bubbleBottom + bubbleGap + pinHeight + pinLift - (baseShadowHeight * 0.45f),
+        (totalWidth + (pinWidth + baseShadowWidthExtra)) / 2f,
+        bubbleBottom + bubbleGap + pinHeight + pinLift + (baseShadowHeight * 0.55f)
+    )
+    canvas.drawOval(baseShadowRect, baseShadowPaint)
+
     val bubblePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
-        setShadowLayer(shadowBlur, 0f, shadowDy, android.graphics.Color.argb(60, 0, 0, 0))
+        setShadowLayer(shadowBlur, 0f, shadowDy, android.graphics.Color.argb(65, 0, 0, 0))
     }
 
     canvas.drawRoundRect(
@@ -910,15 +926,54 @@ private fun createRouteStopMarkerBitmap(
         bubblePaint
     )
 
-    val textX = bubbleLeft + bubblePadH
+    val textX = bubbleLeft + (bubbleWidth - textWidth) / 2f
     val textBaseline = bubbleTop + bubblePadV - textPaint.fontMetrics.top
     canvas.drawText(safeLabel, textX, textBaseline, textPaint)
 
     val pinBitmap = createScaledDrawableBitmap(ctx, R.drawable.route_stop_pin, pinWidth, pinHeight)
     if (pinBitmap != null) {
         val pinLeft = (totalWidth - pinWidth) / 2f
-        val pinTop = bubbleBottom + bubbleGap
+        val pinTop = bubbleBottom + bubbleGap + pinLift
+
+        val pinShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(90, 0, 0, 0)
+            maskFilter = android.graphics.BlurMaskFilter(8f * density, android.graphics.BlurMaskFilter.Blur.NORMAL)
+        }
+        canvas.drawOval(
+            RectF(
+                pinLeft + 6f * density,
+                pinTop + pinHeight - 3f * density,
+                pinLeft + pinWidth - 6f * density,
+                pinTop + pinHeight + 5f * density
+            ),
+            pinShadowPaint
+        )
+
+        val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = android.graphics.LinearGradient(
+                pinLeft,
+                pinTop,
+                pinLeft,
+                pinTop + pinHeight,
+                intArrayOf(
+                    android.graphics.Color.argb(90, 255, 255, 255),
+                    android.graphics.Color.argb(0, 255, 255, 255)
+                ),
+                null,
+                android.graphics.Shader.TileMode.CLAMP
+            )
+        }
+
         canvas.drawBitmap(pinBitmap, pinLeft, pinTop, null)
+        canvas.drawOval(
+            RectF(
+                pinLeft + 5f * density,
+                pinTop + 4f * density,
+                pinLeft + pinWidth - 5f * density,
+                pinTop + pinHeight * 0.50f
+            ),
+            highlightPaint
+        )
     }
 
     return bitmap
@@ -948,6 +1003,7 @@ private fun OsmdroidLiveMap(
     var locationCallback by remember { mutableStateOf<LocationCallback?>(null) }
     var lastUserLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var hasFittedRoute by remember(routeId, routeText) { mutableStateOf(false) }
+    var mapViewRef by remember { mutableStateOf<MapView?>(null) }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -956,9 +1012,11 @@ private fun OsmdroidLiveMap(
                 setMultiTouchControls(true)
                 controller.setZoom(15.0)
                 // TODO: MBTiles tile source attach (dependency-specific)
+                mapViewRef = this
             }
         },
         update = { map ->
+            mapViewRef = map
             // TODO: if mbtilesPath changes, reload tilesource accordingly
 
             // Remove previous selected-road overlays before drawing the latest one
@@ -1003,6 +1061,7 @@ private fun OsmdroidLiveMap(
                     val marker = Marker(map).apply {
                         position = point
                         title = label
+                        infoWindow = null
                         relatedObject = "selected_route_marker"
                         alpha = 0.98f
 
@@ -1010,7 +1069,7 @@ private fun OsmdroidLiveMap(
                         val markerBitmap = createRouteStopMarkerBitmap(ctx, label)
                         icon = android.graphics.drawable.BitmapDrawable(ctx.resources, markerBitmap)
                         // pin এর bottom point যেন location এ লাগে
-                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        setAnchor(Marker.ANCHOR_CENTER, 0.90f)
                     }
                     map.overlays.add(marker)
                 }
@@ -1028,9 +1087,9 @@ private fun OsmdroidLiveMap(
                 // Keep selected route overlays above other overlays
                 map.overlays.sortBy { overlay ->
                     when {
-                        overlay is Marker && overlay.relatedObject == "live_location_marker" -> 3
-                        overlay is Marker && overlay.relatedObject == "selected_route_marker" -> 2
-                        overlay is Polyline -> 1
+                        overlay is Marker && overlay.relatedObject == "live_location_marker" -> 100
+                        overlay is Marker && overlay.relatedObject == "selected_route_marker" -> 50
+                        overlay is Polyline -> 10
                         else -> 0
                     }
                 }
@@ -1042,21 +1101,46 @@ private fun OsmdroidLiveMap(
             }
 
             if (enableLiveLocation) {
-                if (locationCallback == null) {
+                val existingLiveMarker = map.overlays
+                    .filterIsInstance<Marker>()
+                    .firstOrNull { it.relatedObject == "live_location_marker" }
+
+                val marker = existingLiveMarker ?: run {
                     val liveDot = ShapeDrawable(OvalShape()).apply {
-                        intrinsicWidth = 36
-                        intrinsicHeight = 36
-                        paint.color = android.graphics.Color.parseColor("#1E88E5")
+                        intrinsicWidth = 44
+                        intrinsicHeight = 44
+                        paint.style = android.graphics.Paint.Style.FILL_AND_STROKE
+                        paint.strokeWidth = 5f
+                        paint.color = android.graphics.Color.parseColor("#0A84FF")
+                        paint.setShadowLayer(0f, 0f, 0f, android.graphics.Color.TRANSPARENT)
                     }
 
-                    val marker = Marker(map).apply {
+                    // Draw a white border behind the blue dot
+                    val borderedBitmap = Bitmap.createBitmap(54, 54, Bitmap.Config.ARGB_8888)
+                    val borderedCanvas = Canvas(borderedBitmap)
+                    val borderPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        style = android.graphics.Paint.Style.FILL
+                        color = android.graphics.Color.WHITE
+                    }
+                    val dotPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        style = android.graphics.Paint.Style.FILL
+                        color = android.graphics.Color.parseColor("#0A84FF")
+                    }
+                    borderedCanvas.drawCircle(27f, 27f, 23f, borderPaint)
+                    borderedCanvas.drawCircle(27f, 27f, 18f, dotPaint)
+
+                    Marker(map).apply {
                         title = "My live location"
                         relatedObject = "live_location_marker"
-                        icon = liveDot
+                        icon = android.graphics.drawable.BitmapDrawable(ctx.resources, borderedBitmap)
+                        alpha = 1f
+                        infoWindow = null
                         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        map.overlays.add(this)
                     }
-                    map.overlays.add(marker)
+                }
 
+                if (locationCallback == null) {
                     val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1500L)
                         .setMinUpdateDistanceMeters(5f)
                         .build()
@@ -1067,6 +1151,10 @@ private fun OsmdroidLiveMap(
                             val p = GeoPoint(loc.latitude, loc.longitude)
                             marker.position = p
                             lastUserLocation = p
+
+                            // Keep own location visually above every other overlay
+                            map.overlays.remove(marker)
+                            map.overlays.add(marker)
                             map.invalidate()
                         }
                     }
@@ -1082,12 +1170,13 @@ private fun OsmdroidLiveMap(
                     try { fused.removeLocationUpdates(it) } catch (_: SecurityException) { }
                 }
                 locationCallback = null
+                map.overlays.removeAll { overlay ->
+                    overlay is Marker && overlay.relatedObject == "live_location_marker"
+                }
             }
 
-            if (centerOnUserRequest) {
-                lastUserLocation?.let {
-                    map.controller.animateTo(it)
-                }
+            if (centerOnUserRequest && lastUserLocation != null) {
+                map.controller.animateTo(lastUserLocation)
                 onCenterConsumed()
             }
         }
@@ -1101,6 +1190,12 @@ private fun OsmdroidLiveMap(
                 try { fused.removeLocationUpdates(it) } catch (_: SecurityException) { }
             }
             locationCallback = null
+
+            runCatching {
+                mapViewRef?.overlays?.clear()
+                mapViewRef?.onDetach()
+            }
+            mapViewRef = null
         }
     }
 }

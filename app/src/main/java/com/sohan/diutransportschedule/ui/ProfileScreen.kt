@@ -100,6 +100,11 @@ import android.os.VibratorManager
 import androidx.compose.material.icons.filled.GraphicEq
 import java.io.File
 import java.io.FileOutputStream
+import androidx.core.app.NotificationManagerCompat
+import android.app.AlarmManager
+import android.app.PendingIntent
+import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.ScheduleAlarmReceiver
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -108,14 +113,16 @@ fun ProfileScreen(vm: HomeViewModel) {
     val selectedRoute by vm.selectedRoute.collectAsState()
     val isFriday = java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
 
-    // Keep ALL persisted as OFF. Friday should only force a temporary OFF without overwriting saved preference.
-    LaunchedEffect(selectedRoute) {
+    // Route-based notification behavior:
+    // - ALL => notifications OFF
+    // - Any specific route => notifications ON by default
+    // Route/day-based notification behavior:
+    // - Friday => notifications OFF
+    // - ALL => notifications OFF
+    // - Any specific route on other days => notifications ON by default
+    LaunchedEffect(selectedRoute, isFriday) {
         val isAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
-        if (isAll && vm.notificationsEnabled.value) {
-            vm.setNotificationsEnabled(false)
-        } else if (isAll) {
-            vm.setNotificationsEnabled(false)
-        }
+        vm.setNotificationsEnabled(!isFriday && !isAll)
     }
 
 // ✅ Always use FULL route list from VM (not filtered by Home)
@@ -382,6 +389,19 @@ fun ProfileScreen(vm: HomeViewModel) {
         mutableStateOf(alertPrefs.getBoolean("alarm_vibrate_5m", true))
     }
 
+    LaunchedEffect(selectedRoute, notificationsEnabled, isFriday) {
+        val isAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
+        val shouldEnableExtras = notificationsEnabled && !isAll && !isFriday
+
+        alarmSound5mEnabled = shouldEnableExtras
+        alarmVibrate5mEnabled = shouldEnableExtras
+
+        alertPrefs.edit()
+            .putBoolean("alarm_sound_5m", shouldEnableExtras)
+            .putBoolean("alarm_vibrate_5m", shouldEnableExtras)
+            .apply()
+    }
+
     var customVibrationPattern by rememberSaveable {
         mutableStateOf(alertPrefs.getString("custom_vibration_pattern", "Default vibration") ?: "Default vibration")
     }
@@ -421,6 +441,16 @@ fun ProfileScreen(vm: HomeViewModel) {
         color = MaterialTheme.colorScheme.background
     ) {
         val scrollState = rememberScrollState()
+        val ctx = LocalContext.current
+        val alarmGuardPrefs = remember {
+            ctx.getSharedPreferences("alarm_route_guard_prefs", Context.MODE_PRIVATE)
+        }
+        // selectedRoute is available here
+        LaunchedEffect(selectedRoute) {
+            alarmGuardPrefs.edit()
+                .putString("selected_route", selectedRoute.trim())
+                .apply()
+        }
         if (showReloadPopup || isSyncing) {
             Dialog(
                 onDismissRequest = { },
@@ -664,6 +694,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                     onClick = {
                                         routeMenuExpanded = false
                                         vm.setSelectedRoute(opt.routeNo)
+
                                         // Save selected road for LiveMap (Map tab)
                                         val rid = opt.routeNo.trim()
                                         val fullRoadText = buildString {
@@ -678,17 +709,38 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             SelectedRoadStore.save(ctx, rid, fullRoadText)
                                         }
 
-                                // If user picks ALL, persist notifications OFF.
-                                // Friday OFF is temporary in UI only; do not overwrite saved preference.
-                                val picked = opt.routeNo.trim()
-                                if (picked.equals("ALL", ignoreCase = true)) {
-                                    vm.setNotificationsEnabled(false)
-                                }
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
+                                        // Route change hole sathe sathe old scheduled alarm cancel + old queue clear
+                                        val alarmManager = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                                        val alarmIntent = Intent(ctx, ScheduleAlarmReceiver::class.java)
+                                        val alarmPi = PendingIntent.getBroadcast(
+                                            ctx,
+                                            MainActivity.ALARM_REQ_CODE,
+                                            alarmIntent,
+                                            PendingIntent.FLAG_UPDATE_CURRENT or
+                                                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                                                        PendingIntent.FLAG_IMMUTABLE else 0)
+                                        )
+                                        alarmManager.cancel(alarmPi)
+                                        NotificationManagerCompat.from(ctx).cancel(MainActivity.ALARM_REQ_CODE)
+                                        ctx.getSharedPreferences(
+                                            MainActivity.PREF_SCHEDULE_QUEUE,
+                                            Context.MODE_PRIVATE
+                                        ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "").apply()
+
+                                        // Friday or ALL keeps notifications OFF.
+                                        // Any specific route on other days defaults to ON.
+                                        val picked = opt.routeNo.trim()
+                                        alarmGuardPrefs.edit()
+                                            .putString("selected_route", picked)
+                                            .apply()
+                                        if (isFriday || picked.equals("ALL", ignoreCase = true)) {
+                                            vm.setNotificationsEnabled(false)
+                                        } else {
+                                            vm.setNotificationsEnabled(true)
+                                        }
+                                    }
                                 )
 
-                                // ✅ divider between items
                                 if (index != dailyRouteOptions.lastIndex) {
                                     HorizontalDivider(
                                         modifier = Modifier.padding(horizontal = 14.dp),
@@ -837,7 +889,11 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 color = primaryText
                             )
                             Text(
-                                text = "Get alerts before start/departure time",
+                                text = when {
+                                    isFriday -> "Notifications stay OFF on Friday"
+                                    selectedRoute.trim().equals("ALL", ignoreCase = true) -> "Notifications stay OFF when All routes is selected"
+                                    else -> "Turn this ON to enable notification, ringtone and vibration together"
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = primaryText
                             )
@@ -845,21 +901,43 @@ fun ProfileScreen(vm: HomeViewModel) {
                         Switch(
                             checked = effectiveNotificationsEnabled,
                             onCheckedChange = { enabled ->
-                                vm.setNotificationsEnabled(enabled)
+                                val isAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
+                                val finalEnabled = enabled && !isAll
 
-                                if (!enabled) {
-                                    alarmSound5mEnabled = false
-                                    alarmVibrate5mEnabled = false
-                                    alertPrefs.edit()
-                                        .putBoolean("alarm_sound_5m", false)
-                                        .putBoolean("alarm_vibrate_5m", false)
-                                        .apply()
-                                }
+                                vm.setNotificationsEnabled(finalEnabled)
 
-                                showToggleMessage(if (enabled) "Notifications ON" else "Notifications OFF")
+                                alarmSound5mEnabled = finalEnabled
+                                alarmVibrate5mEnabled = finalEnabled
+
+                                alertPrefs.edit()
+                                    .putBoolean("alarm_sound_5m", finalEnabled)
+                                    .putBoolean("alarm_vibrate_5m", finalEnabled)
+                                    .apply()
+
+                                showToggleMessage(
+                                    if (finalEnabled) {
+                                        "Notifications, ringtone and vibration ON"
+                                    } else {
+                                        "Notifications, ringtone and vibration OFF"
+                                    }
+                                )
                             },
                             enabled = !isFriday && !selectedRoute.trim().equals("ALL", ignoreCase = true),
                             colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
+                        )
+                    }
+
+                    if (isFriday) {
+                        Text(
+                            text = "Notifications stay off on Friday.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = secondaryText
+                        )
+                    } else if (selectedRoute.trim().equals("ALL", ignoreCase = true)) {
+                        Text(
+                            text = "Select a specific route to turn notifications on.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = secondaryText
                         )
                     }
 
@@ -926,7 +1004,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 )
                             }
 
-                            AnimatedVisibility(visible = alarmSound5mEnabled) {
+                            AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmSound5mEnabled) {
                                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Spacer(Modifier.height(4.dp))
 
@@ -1012,7 +1090,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 )
                             }
 
-                            AnimatedVisibility(visible = alarmVibrate5mEnabled) {
+                            AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmVibrate5mEnabled) {
                                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Spacer(Modifier.height(4.dp))
 

@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import android.content.pm.ServiceInfo
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
@@ -28,7 +29,7 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
         val tmp = File(outDir, "route_${routeId}_${style}.mbtiles.part")
         val dst = File(outDir, "route_${routeId}_${style}.mbtiles")
 
-        setForeground(createFg(0))
+        runCatching { setForeground(createFg(-1)) }
 
         val client = OkHttpClient.Builder()
             .retryOnConnectionFailure(true)
@@ -60,11 +61,11 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
                                 if (total > 0) {
                                     val p = ((done * 100) / total).toInt().coerceIn(0, 100)
                                     setProgress(workDataOf("progress" to p, "done_bytes" to done, "total_bytes" to total))
-                                    setForeground(createFg(p))
+                                    runCatching { setForeground(createFg(p)) }
                                 } else {
                                     // Unknown total => UI shows indeterminate progress instead of 0%
                                     setProgress(workDataOf("progress" to -1, "done_bytes" to done, "total_bytes" to -1L))
-                                    setForeground(createFg(0))
+                                    runCatching { setForeground(createFg(-1)) }
                                 }
                             }
                         }
@@ -74,7 +75,7 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
 // Final progress
                 if (total > 0) {
                     setProgress(workDataOf("progress" to 100, "done_bytes" to done, "total_bytes" to total))
-                    setForeground(createFg(100))
+                    runCatching { setForeground(createFg(100)) }
                 } else {
                     setProgress(workDataOf("progress" to -1, "done_bytes" to done, "total_bytes" to -1L))
                 }
@@ -85,7 +86,8 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
 
             Result.success(workDataOf("file_path" to dst.absolutePath))
         } catch (e: Exception) {
-            Result.retry()
+            if (tmp.exists()) tmp.delete()
+            if (runAttemptCount >= 3) Result.failure() else Result.retry()
         }
     }
 
@@ -93,15 +95,27 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
         val channelId = "offline_downloads"
         ensureChannel(channelId)
 
+        val indeterminate = progress < 0
+        val safeProgress = progress.coerceIn(0, 100)
+
         val notification = NotificationCompat.Builder(applicationContext, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Downloading offline map")
-            .setContentText("$progress%")
+            .setContentText(if (indeterminate) "Preparing download..." else "$safeProgress%")
             .setOngoing(true)
-            .setProgress(100, progress, false)
+            .setOnlyAlertOnce(true)
+            .setProgress(100, safeProgress, indeterminate)
             .build()
 
-        return ForegroundInfo(1001, notification)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(
+                1001,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            ForegroundInfo(1001, notification)
+        }
     }
 
     private fun ensureChannel(channelId: String) {

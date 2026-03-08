@@ -28,7 +28,6 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import com.sohan.diutransportschedule.MainActivity.Companion.ACTION_STOP_SCHEDULE_ALARM
 import com.sohan.diutransportschedule.MainActivity.Companion.ALARM_REQ_CODE
 import com.sohan.diutransportschedule.MainActivity.Companion.EXTRA_TEXT
@@ -53,6 +52,8 @@ private const val KEY_ALARM_SOUND_5M = "alarm_sound_5m"
 private const val KEY_ALARM_VIBRATE_5M = "alarm_vibrate_5m"
 private const val KEY_CUSTOM_RINGTONE_URI = "custom_ringtone_uri"
 private const val KEY_CUSTOM_RINGTONE_NAME = "custom_ringtone_name"
+private const val ALARM_ROUTE_GUARD_PREFS = "alarm_route_guard_prefs"
+private const val KEY_SELECTED_ROUTE_GUARD = "selected_route"
 
 private object RunningAlertController {
     private var ringtone: Ringtone? = null
@@ -299,7 +300,30 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         // 1) Title line: "DIU Bus Reminder • {RoadNo}"
         val routeLabel = rawTitle.substringAfter('•', missingDelimiterValue = "").trim()
-        val titleLine = if (routeLabel.isNotBlank()) "DIU Bus Reminder • $routeLabel" else "DIU Bus Reminder"
+
+        val selectedRouteGuard = context
+            .getSharedPreferences(ALARM_ROUTE_GUARD_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_SELECTED_ROUTE_GUARD, "ALL")
+            .orEmpty()
+            .trim()
+
+        if (
+            selectedRouteGuard.isNotBlank() &&
+            !selectedRouteGuard.equals("ALL", ignoreCase = true) &&
+            routeLabel.isNotBlank() &&
+            !routeLabel.equals(selectedRouteGuard, ignoreCase = true)
+        ) {
+            Log.w(
+                "ScheduleAlarmReceiver",
+                "Ignoring stale alarm for route=$routeLabel because current selected route=$selectedRouteGuard"
+            )
+            try {
+                scheduleNextFromStoredQueue(context)
+            } catch (t: Throwable) {
+                Log.e("ScheduleAlarmReceiver", "Failed to schedule next alarm after stale-route ignore", t)
+            }
+            return
+        }
 
         // 2) Destination line: first before first "<>" and last after last "<>"
         val routeName = rawText.substringBefore(" at ").trim().ifBlank { rawText.trim() }
@@ -316,8 +340,32 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         val timeToken = rawText.substringAfter(" at ", missingDelimiterValue = "").trim()
             .substringBefore("(").trim()
         val timeLine = if (timeToken.isNotBlank()) "Time: $timeToken" else ""
+        val routeLine = if (routeLabel.isNotBlank()) "Route: $routeLabel" else ""
 
-        val collapsedTitle = if (timeToken.isNotBlank()) "DIU Bus Reminder • $timeToken" else "DIU Bus Reminder"
+        val collapsedTitle = if (routeLabel.isNotBlank()) {
+            "DIU Bus Reminder • $routeLabel"
+        } else {
+            "DIU Bus Reminder"
+        }
+
+        val collapsedText = when {
+            destLine.isNotBlank() && timeToken.isNotBlank() -> "$destLine • $timeToken"
+            destLine.isNotBlank() -> destLine
+            timeToken.isNotBlank() -> timeLine
+            else -> rawText
+        }
+
+        val expandedBody = buildString {
+            if (destLine.isNotBlank()) append(destLine)
+            if (routeLine.isNotBlank()) {
+                if (isNotEmpty()) append("\n")
+                append(routeLine)
+            }
+            if (timeLine.isNotBlank()) {
+                if (isNotEmpty()) append("\n")
+                append(timeLine)
+            }
+        }.ifBlank { rawText }
 
         // Tap on the notification body: stop ONLY this running alert + open the app.
         // We route the tap through this receiver so we can stop sound/vibration reliably.
@@ -348,8 +396,16 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
                     (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
+        // Themed green Stop action icon (cleaner on MIUI / Samsung)
+        val actionColor = 0xFF2ECC71.toInt()
+        val baseDrawable = ContextCompat.getDrawable(context, android.R.drawable.ic_media_pause)?.mutate()
+        baseDrawable?.setTint(actionColor)
+
+        val iconBitmap = BitmapFactory.decodeResource(context.resources, android.R.drawable.ic_media_pause)
+        val icon = androidx.core.graphics.drawable.IconCompat.createWithBitmap(iconBitmap)
+
         val stopAction = NotificationCompat.Action.Builder(
-            android.R.drawable.ic_media_pause,
+            icon,
             "Stop",
             stopPi
         ).build()
@@ -362,14 +418,6 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         val COLOR_GREEN = 0xFF2ECC71.toInt()
         val COLOR_WHITE = 0xFFFFFFFF.toInt()
 
-        val bigBody = buildString {
-            append(destLine)
-            if (timeToken.isNotBlank()) {
-                append("\n")
-                append("Time: ")
-                append(timeToken)
-            }
-        }
 
         val builder = NotificationCompat.Builder(context, channelId)
             // ✅ Right side logo remove: small icon generic (MIUI header এ DIU logo দেখাবে না)
@@ -377,16 +425,16 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setColorized(true)
             .setColor(COLOR_DEEP_BLUE)   // deep blue base
             .setLargeIcon(largeLogo)          // ✅ left logo
-            .setContentTitle(titleLine)
             // Collapsed view
             .setContentTitle(collapsedTitle)
-            .setContentText(if (timeToken.isNotBlank()) "Time: $timeToken" else destLine)
+            .setContentText(collapsedText)
             // Expanded view
             .setStyle(
-                MediaNotificationCompat.MediaStyle()
-                    .setShowActionsInCompactView(0)
+                NotificationCompat.BigTextStyle()
+                    .bigText(expandedBody)
+                    .setSummaryText(if (routeLabel.isNotBlank()) "DIU Bus Reminder • $routeLabel" else "DIU Bus Reminder")
             )
-            .setSubText(destLine)
+            .setSubText(if (timeToken.isNotBlank()) timeToken else null)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(true)                // ✅ time hide হবে না
             .addAction(stopAction)
@@ -452,8 +500,22 @@ private fun scheduleNextFromStoredQueue(context: Context) {
     val raw = prefs.getString(MainActivity.KEY_SCHEDULE_QUEUE, "").orEmpty()
 
     val nowMs = System.currentTimeMillis()
+    val selectedRouteGuard = context
+        .getSharedPreferences(ALARM_ROUTE_GUARD_PREFS, Context.MODE_PRIVATE)
+        .getString(KEY_SELECTED_ROUTE_GUARD, "ALL")
+        .orEmpty()
+        .trim()
+
     val all = parseQueue(raw)
         .filter { it.atMs > nowMs - 2_000L } // keep near-future items; tolerate small clock drift
+        .filter { item ->
+            if (selectedRouteGuard.isBlank() || selectedRouteGuard.equals("ALL", ignoreCase = true)) {
+                true
+            } else {
+                val queuedRoute = item.title.substringAfter('•', missingDelimiterValue = "").trim()
+                queuedRoute.equals(selectedRouteGuard, ignoreCase = true)
+            }
+        }
         .distinctBy { "${it.atMs}|${it.title}|${it.text}" }
         .sortedBy { it.atMs }
 
