@@ -757,6 +757,12 @@ fun LiveMapScreen() {
             }
         }
 
+        LaunchedEffect(offlineState) {
+            if (offlineState is OfflineState.NotDownloaded) {
+                startDownload()
+            }
+        }
+
         OfflineOverlay(
             state = offlineState,
             doneBytes = lastDoneBytes,
@@ -791,7 +797,7 @@ private fun OfflineOverlay(
     onDownload: () -> Unit,
     onRetry: () -> Unit
 ){
-    if (state is OfflineState.Ready) return
+    if (state is OfflineState.Ready || state is OfflineState.NotDownloaded) return
 
     Box(
         modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)),
@@ -803,11 +809,6 @@ private fun OfflineOverlay(
                 Spacer(Modifier.height(8.dp))
 
                 when (state) {
-                    is OfflineState.NotDownloaded -> {
-                        Text("Offline map use korte hole ekbar download korte hobe.")
-                        Spacer(Modifier.height(12.dp))
-                        Button(onClick = onDownload) { Text("Download") }
-                    }
                     is OfflineState.Downloading -> {
                         val p = state.progress
                         val infoLine = if (totalBytes > 0) {
@@ -826,7 +827,7 @@ private fun OfflineOverlay(
                         } else {
                             Text("Downloading… ($infoLine)")
                             Spacer(Modifier.height(12.dp))
-                            LinearProgressIndicator() // indeterminate
+                            LinearProgressIndicator()
                         }
                     }
                     is OfflineState.Failed -> {
@@ -834,8 +835,8 @@ private fun OfflineOverlay(
                         Spacer(Modifier.height(12.dp))
                         Button(onClick = onRetry) { Text("Retry") }
                     }
-                    is OfflineState.Ready -> {
-                        // no-op (overlay hidden by early return)
+                    is OfflineState.NotDownloaded, is OfflineState.Ready -> {
+                        // hidden by early return
                     }
                 }
             }
@@ -1135,7 +1136,7 @@ private fun OsmdroidLiveMap(
                         icon = android.graphics.drawable.BitmapDrawable(ctx.resources, borderedBitmap)
                         alpha = 1f
                         infoWindow = null
-                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                        setAnchor(0.5f, 0.5f)
                         map.overlays.add(this)
                     }
                 }

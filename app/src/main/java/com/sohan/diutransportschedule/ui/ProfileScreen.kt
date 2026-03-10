@@ -382,7 +382,7 @@ fun ProfileScreen(vm: HomeViewModel) {
     }
 
     var alarmSound5mEnabled by rememberSaveable {
-        mutableStateOf(alertPrefs.getBoolean("alarm_sound_5m", true))
+        mutableStateOf(alertPrefs.getBoolean("alarm_sound_5m", false))
     }
 
     var alarmVibrate5mEnabled by rememberSaveable {

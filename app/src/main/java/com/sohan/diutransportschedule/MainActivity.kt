@@ -1254,7 +1254,7 @@ private fun scheduleNextAlarmFromData(
     val now = LocalDateTime.now()
     val zone = ZoneId.systemDefault()
 
-    val upcoming = mutableListOf<Triple<Long, String, String>>()
+    val upcoming = mutableListOf<PendingAlarmCandidate>()
 
     for (any in filtered) {
         val rawRouteNo = any.readFirstStringProp("routeNo", "route_no", "route", "routeId").trim()
@@ -1272,23 +1272,63 @@ private fun scheduleNextAlarmFromData(
         val allTimes = (startTimes + departureTimes)
             .map { it.trim() }
             .filter { it.isNotBlank() }
-            .flatMap { extractClockTimes(it) }
+            .flatMap { raw -> extractClockTimeEntries(raw) }
 
         Log.d("RouteNotificationScheduler", "Parsed times count=${allTimes.size} for routeNo=$routeNo")
 
-        for (t in allTimes) {
+        for ((t, sourceToken) in allTimes) {
+            if (t == LocalTime.MIDNIGHT && !explicitlyRepresentsMidnight(sourceToken)) {
+                Log.w(
+                    "RouteNotificationScheduler",
+                    "Skipping suspicious midnight parse for routeNo=$routeNo source=$sourceToken"
+                )
+                continue
+            }
+
             val next = nextOccurrence(now, t) ?: continue
             val fireAt = next.minusMinutes(leadMinutes.toLong())
             if (fireAt.isAfter(now)) {
                 val fireMs = fireAt.atZone(zone).toInstant().toEpochMilli()
+                if (fireMs <= System.currentTimeMillis()) {
+                    Log.w(
+                        "RouteNotificationScheduler",
+                        "Skipping candidate because fireMs is not in future routeNo=$routeNo source=$sourceToken fireMs=$fireMs"
+                    )
+                    continue
+                }
+
                 val title = if (routeNo.isNotBlank()) {
                     "DIU Bus Reminder • $routeNo"
                 } else {
                     "DIU Bus Reminder"
                 }
-                val text =
-                    "$routeName at ${formatTime(next.toLocalTime())} (lead ${leadMinutes}m)"
-                upcoming.add(Triple(fireMs, title, text))
+
+                val displayTime = formatTime(next.toLocalTime())
+                val explicitMidnight = explicitlyRepresentsMidnight(sourceToken)
+
+                if (isSuspiciousDisplayMidnight(displayTime, explicitMidnight)) {
+                    Log.w(
+                        "RouteNotificationScheduler",
+                        "Skipping suspicious midnight candidate routeNo=$routeNo routeName=$routeName source=$sourceToken displayTime=$displayTime"
+                    )
+                    continue
+                }
+
+                val text = sanitizeNotificationText(routeName, displayTime, leadMinutes)
+
+                upcoming.add(
+                    PendingAlarmCandidate(
+                        atMs = fireMs,
+                        title = title,
+                        text = text,
+                        sourceToken = sourceToken,
+                        explicitMidnight = explicitMidnight,
+                        routeNo = routeNo,
+                        routeName = routeName,
+                        displayTime = displayTime,
+                        fingerprint = buildAlarmFingerprint(routeNo, routeName, displayTime)
+                    )
+                )
             }
         }
     }
@@ -1304,25 +1344,116 @@ private fun scheduleNextAlarmFromData(
     }
 
     val queue = upcoming
-        .filter { (_, title, _) ->
-            val queuedRoute = title.substringAfter('•', missingDelimiterValue = "").trim()
-            routeMatchesSelected(queuedRoute)
+        .filter { item ->
+            val queuedRoute = item.title.substringAfter('•', missingDelimiterValue = "").trim()
+            val matched = routeMatchesSelected(queuedRoute)
+            if (!matched) {
+                Log.w(
+                    "RouteNotificationScheduler",
+                    "Dropping queue item due to route mismatch queuedRoute=$queuedRoute selected=$effectiveSelectedRoute text=${item.text}"
+                )
+            }
+            matched
         }
-        .distinctBy { it.first }
-        .sortedBy { it.first }
+        .filter { item ->
+            if (item.atMs <= System.currentTimeMillis()) {
+                Log.w("RouteNotificationScheduler", "Dropping non-future queue item ms=${item.atMs} text=${item.text}")
+                false
+            } else {
+                true
+            }
+        }
+        .filter { item ->
+            if (item.title.isBlank() || item.text.isBlank()) {
+                Log.w("RouteNotificationScheduler", "Dropping malformed queue item title=${item.title} text=${item.text}")
+                false
+            } else {
+                true
+            }
+        }
+        .filter { item ->
+            val suspiciousMidnight = isSuspiciousDisplayMidnight(item.displayTime, item.explicitMidnight)
+            if (suspiciousMidnight) {
+                Log.w(
+                    "RouteNotificationScheduler",
+                    "Dropping suspicious queued midnight item route=${item.title} source=${item.sourceToken} text=${item.text}"
+                )
+                false
+            } else {
+                true
+            }
+        }
+        .distinctBy { "${it.atMs}|${it.title}|${it.text}" }
+        .sortedBy { it.atMs }
         .take(60)
 
-    val qStr = queue.joinToString("\n") { (ms, t, x) ->
-        "${ms}|${t.replace("|", " ")}|${x.replace("|", " ")}"
+    if (queue.isEmpty()) {
+        Log.w("RouteNotificationScheduler", "Queue became empty after safety filters — canceling any pending alarm")
+        cancelNextAlarm(context)
+        context.getSharedPreferences(
+            MainActivity.PREF_SCHEDULE_QUEUE,
+            Context.MODE_PRIVATE
+        ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "").apply()
+        return
+    }
+
+    val qStr = queue.joinToString("\n") { item ->
+        listOf(
+            item.atMs.toString(),
+            item.title.replace("|", " "),
+            item.text.replace("|", " "),
+            if (item.explicitMidnight) "1" else "0",
+            item.fingerprint.replace("|", "~"),
+            item.sourceToken.replace("|", " "),
+            item.displayTime.replace("|", " ")
+        ).joinToString("|")
     }
 
     context.getSharedPreferences(
         MainActivity.PREF_SCHEDULE_QUEUE,
         Context.MODE_PRIVATE
     ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, qStr).apply()
+    Log.d("RouteNotificationScheduler", "Saved queue size=${queue.size} first=${queue.firstOrNull()?.text.orEmpty()}")
 
     // ---- Schedule ONLY first alarm ----
-    val (firstMs, firstTitle, firstText) = queue.first()
+    val first = queue.first()
+
+    val firstMs = first.atMs
+    val firstTitle = first.title
+    val firstText = first.text
+
+    if (firstTitle.isBlank() || firstText.isBlank()) {
+        Log.w("RouteNotificationScheduler", "Refusing to schedule malformed first alarm title=$firstTitle text=$firstText")
+        cancelNextAlarm(context)
+        context.getSharedPreferences(
+            MainActivity.PREF_SCHEDULE_QUEUE,
+            Context.MODE_PRIVATE
+        ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "").apply()
+        return
+    }
+
+    if (firstMs <= System.currentTimeMillis()) {
+        Log.w("RouteNotificationScheduler", "Refusing to schedule non-future first alarm atMs=$firstMs text=$firstText")
+        cancelNextAlarm(context)
+        context.getSharedPreferences(
+            MainActivity.PREF_SCHEDULE_QUEUE,
+            Context.MODE_PRIVATE
+        ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "").apply()
+        return
+    }
+
+    if (isSuspiciousDisplayMidnight(first.displayTime, first.explicitMidnight)) {
+        Log.w(
+            "RouteNotificationScheduler",
+            "Refusing to schedule suspicious first midnight alarm source=${first.sourceToken} text=${first.text}"
+        )
+        cancelNextAlarm(context)
+        context.getSharedPreferences(
+            MainActivity.PREF_SCHEDULE_QUEUE,
+            Context.MODE_PRIVATE
+        ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "").apply()
+        return
+    }
 
     cancelNextAlarm(context)
 
@@ -1330,6 +1461,9 @@ private fun scheduleNextAlarmFromData(
         putExtra(MainActivity.EXTRA_TITLE, firstTitle)
         putExtra(MainActivity.EXTRA_TEXT, firstText)
         putExtra(com.sohan.diutransportschedule.EXTRA_AT_MS, firstMs)
+        putExtra(com.sohan.diutransportschedule.EXTRA_EXPLICIT_MIDNIGHT, first.explicitMidnight)
+        putExtra(com.sohan.diutransportschedule.EXTRA_ALARM_FINGERPRINT, first.fingerprint)
+        putExtra(com.sohan.diutransportschedule.EXTRA_SOURCE_TOKEN, first.sourceToken)
     }
 
     val pi = PendingIntent.getBroadcast(
@@ -1390,33 +1524,124 @@ private fun scheduleNextAlarmFromData(
 private fun formatTime(t: LocalTime): String =
     t.format(DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH))
 
+private fun isSuspiciousDisplayMidnight(displayTime: String, explicitMidnight: Boolean): Boolean {
+    return displayTime.equals("12:00 AM", ignoreCase = true) && !explicitMidnight
+}
+
+private fun sanitizeNotificationText(routeName: String, displayTime: String, leadMinutes: Int): String {
+    val safeRouteName = routeName.trim().ifBlank { "DIU Route" }
+    val safeDisplayTime = displayTime.trim().ifBlank { "Unknown time" }
+    return "$safeRouteName at $safeDisplayTime (lead ${leadMinutes}m)"
+}
+private fun buildAlarmFingerprint(routeNo: String, routeName: String, displayTime: String): String {
+    return listOf(
+        routeNo.trim(),
+        routeName.trim(),
+        displayTime.trim().uppercase(Locale.ENGLISH)
+    ).joinToString("|")
+}
 private fun nextOccurrence(now: LocalDateTime, t: LocalTime): LocalDateTime? {
     val today = LocalDate.now()
     val todayDt = LocalDateTime.of(today, t)
     return if (todayDt.isAfter(now)) todayDt else LocalDateTime.of(today.plusDays(1), t)
 }
 
-private fun extractClockTimes(raw: String): List<LocalTime> {
-    // Support (with or without seconds):
-    // - 12h: 7:30 AM, 7:30AM, 7:30:00 PM, 7:30:00PM
-    // - 12h hour-only: 7 PM, 7PM
-    // - 24h: 07:30, 19:05, 07:30:00, 19:05:00
-    // - dot separator: 7.30 PM, 19.05
+private data class ExtractedClockTime(
+    val time: LocalTime,
+    val sourceToken: String
+)
 
-    // Prefer longest matches first (so "9:37:00 PM" doesn't become "9:37")
+private data class PendingAlarmCandidate(
+    val atMs: Long,
+    val title: String,
+    val text: String,
+    val sourceToken: String,
+    val explicitMidnight: Boolean,
+    val routeNo: String,
+    val routeName: String,
+    val displayTime: String,
+    val fingerprint: String
+)
+
+private fun explicitlyRepresentsMidnight(rawToken: String): Boolean {
+    val token = rawToken
+        .trim()
+        .replace(Regex("\\s+"), " ")
+        .uppercase(Locale.ENGLISH)
+        .replace('.', ':')
+
+    return token == "12 AM" ||
+        token == "12:00 AM" ||
+        token == "12:00:00 AM" ||
+        token == "00:00" ||
+        token == "00:00:00"
+}
+
+private fun extractMeridiemFromSourceToken(rawToken: String): String? {
+    val token = rawToken.uppercase(Locale.ENGLISH)
+    return when {
+        token.contains("AM") -> "AM"
+        token.contains("PM") -> "PM"
+        else -> null
+    }
+}
+
+private fun meridiemOfLocalTime(time: LocalTime): String {
+    return if (time.hour < 12) "AM" else "PM"
+}
+
+private fun isParsedTimeConsistentWithSource(rawToken: String, parsedTime: LocalTime): Boolean {
+    val sourceMeridiem = extractMeridiemFromSourceToken(rawToken) ?: return true
+    return sourceMeridiem == meridiemOfLocalTime(parsedTime)
+}
+
+private fun extractClockTimeEntries(raw: String): List<ExtractedClockTime> {
+    data class TokenMatch(val value: String, val start: Int, val end: Int, val kind: Int)
+
+    // kind priority:
+    // 3 = 12h with AM/PM
+    // 2 = 24h without AM/PM
+    // 1 = hour-only with AM/PM
     val patterns = listOf(
-        // 12-hour with optional seconds + AM/PM
-        Regex("(\\b\\d{1,2}[:.]\\d{2}(?:[:.]\\d{2})?\\s*[AaPp][Mm]\\b)"),
-        // 24-hour with optional seconds (no AM/PM)
-        Regex("(\\b\\d{1,2}[:.]\\d{2}(?:[:.]\\d{2})?\\b)"),
-        // hour-only AM/PM
-        Regex("(\\b\\d{1,2}\\s*[AaPp][Mm]\\b)")
+        3 to Regex("(\\b\\d{1,2}[:.]\\d{2}(?:[:.]\\d{2})?\\s*[AaPp][Mm]\\b)"),
+        2 to Regex("(\\b\\d{1,2}[:.]\\d{2}(?:[:.]\\d{2})?\\b)"),
+        1 to Regex("(\\b\\d{1,2}\\s*[AaPp][Mm]\\b)")
     )
 
-    val matches = patterns
-        .flatMap { it.findAll(raw).map { m -> m.value }.toList() }
+    val rawMatches = patterns.flatMap { (kind, regex) ->
+        regex.findAll(raw).map { m ->
+            TokenMatch(
+                value = m.value,
+                start = m.range.first,
+                end = m.range.last,
+                kind = kind
+            )
+        }.toList()
+    }
+
+    // Prevent duplicate / overlapping parses like:
+    // "9:37 PM" -> both "9:37 PM" and inner "9:37"
+    // We always keep the strongest / longest token for overlapping ranges.
+    val matches = rawMatches
+        .sortedWith(
+            compareByDescending<TokenMatch> { it.kind }
+                .thenByDescending { it.end - it.start }
+                .thenBy { it.start }
+        )
+        .fold(mutableListOf<TokenMatch>()) { acc, candidate ->
+            val overlaps = acc.any { kept ->
+                candidate.start <= kept.end && candidate.end >= kept.start
+            }
+            if (!overlaps) acc.add(candidate)
+            acc
+        }
+        .sortedBy { it.start }
+        .map { it.value }
         .distinct()
 
+    if (matches.isNotEmpty()) {
+        Log.d("RouteNotificationScheduler", "extractClockTimeEntries raw=$raw matches=${matches.joinToString()}")
+    }
     if (matches.isEmpty()) return emptyList()
 
     val fmt12MinSecSpace = DateTimeFormatter.ofPattern("h:mm:ss a", Locale.ENGLISH)
@@ -1432,14 +1657,12 @@ private fun extractClockTimes(raw: String): List<LocalTime> {
     return matches.mapNotNull { s0 ->
         val s1 = s0.trim().replace(Regex("\\s+"), " ")
         val hasAmPm = s1.contains("AM", ignoreCase = true) || s1.contains("PM", ignoreCase = true)
-
         val normalized = s1.replace('.', ':')
 
-        if (hasAmPm) {
+        val parsed = if (hasAmPm) {
             val up = normalized.uppercase(Locale.ENGLISH)
 
             if (!up.contains(':')) {
-                // "7 PM"
                 try {
                     LocalTime.parse(up, fmt12HourSpace)
                 } catch (_: DateTimeParseException) {
@@ -1450,7 +1673,6 @@ private fun extractClockTimes(raw: String): List<LocalTime> {
                     }
                 }
             } else {
-                // "h:mm(:ss) AM/PM"
                 if (up.count { it == ':' } >= 2) {
                     try {
                         LocalTime.parse(up, fmt12MinSecSpace)
@@ -1474,7 +1696,6 @@ private fun extractClockTimes(raw: String): List<LocalTime> {
                 }
             }
         } else {
-            // 24-hour: "H:mm" or "H:mm:ss"
             if (normalized.count { it == ':' } >= 2) {
                 try {
                     LocalTime.parse(normalized, fmt24MinSec)
@@ -1489,8 +1710,24 @@ private fun extractClockTimes(raw: String): List<LocalTime> {
                 }
             }
         }
+
+        parsed?.let {
+            if (!isParsedTimeConsistentWithSource(s0, it)) {
+                Log.w(
+                    "RouteNotificationScheduler",
+                    "Rejected token because parsed AM/PM does not match source token source=$s0 parsed=$it raw=$raw"
+                )
+                null
+            } else {
+                Log.d("RouteNotificationScheduler", "Parsed clock token source=$s0 parsed=$it raw=$raw")
+                ExtractedClockTime(time = it, sourceToken = s0)
+            }
+        }
     }
 }
+
+private fun extractClockTimes(raw: String): List<LocalTime> =
+    extractClockTimeEntries(raw).map { it.time }
 
 private fun Any.readFirstStringProp(vararg names: String): String {
     for (n in names) {
