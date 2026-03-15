@@ -79,7 +79,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
-
+import android.app.Notification
 import androidx.core.view.WindowCompat
 import android.graphics.Color
 import androidx.core.view.WindowInsetsControllerCompat
@@ -103,6 +103,18 @@ import com.sohan.diutransportschedule.sync.UpdateChecker
 private const val USE_EMULATOR = false
 
 class MainActivity : ComponentActivity() {
+    private fun handleAlarmNotificationLaunch(intent: Intent?) {
+        if (intent?.getBooleanExtra("stop_current_alarm", false) == true) {
+            try {
+                RunningAlertController.stop(applicationContext)
+            } catch (_: Throwable) {
+            }
+            try {
+                NotificationManagerCompat.from(this).cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
+        }
+    }
 
     companion object {
         // Schedule channels (Android 8+ sound/vibration are controlled by channel, so we use 4 channels)
@@ -239,6 +251,7 @@ class MainActivity : ComponentActivity() {
             if (savedDark) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
         )
         super.onCreate(savedInstanceState)
+        handleAlarmNotificationLaunch(intent)
         Log.d("RouteNotificationScheduler", "MainActivity onCreate")
         handleStopNoticeAlarm(intent)
         handleTestScheduleNotification(intent)
@@ -428,6 +441,8 @@ class MainActivity : ComponentActivity() {
     }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        handleAlarmNotificationLaunch(intent)
         handleStopNoticeAlarm(intent)
         handleTestScheduleNotification(intent)
         handleTestScheduleAlarm(intent)
@@ -576,7 +591,6 @@ private const val ADMIN_UPDATES_CHANNEL_ID = "admin_updates"
 private fun ensureAdminUpdatesChannel(ctx: Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-    if (nm.getNotificationChannel(ADMIN_UPDATES_CHANNEL_ID) != null) return
 
     val ch = NotificationChannel(
         ADMIN_UPDATES_CHANNEL_ID,
@@ -1028,33 +1042,18 @@ fun ensureNotificationChannel(
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
 
     val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-
-    val (soundOn, vibrateOn, vibPattern) = when (channelId) {
-        MainActivity.NOTIF_CHANNEL_ID_SOUND_VIB ->
-            Triple(true, true, longArrayOf(0, 500, 250, 900, 250, 500, 400, 1200))
-        MainActivity.NOTIF_CHANNEL_ID_SOUND_ONLY ->
-            Triple(true, false, longArrayOf())
-        MainActivity.NOTIF_CHANNEL_ID_VIB_ONLY ->
-            Triple(false, true, longArrayOf(0, 500, 250, 900, 250, 500, 400, 1200))
-        MainActivity.NOTIF_CHANNEL_ID_SILENT ->
-            Triple(false, false, longArrayOf())
-        else ->
-            Triple(false, false, longArrayOf())
+    val existing = nm.getNotificationChannel(channelId)
+    if (existing != null &&
+        existing.importance == NotificationManager.IMPORTANCE_HIGH &&
+        existing.sound == null &&
+        !existing.shouldVibrate()
+    ) {
+        return
     }
 
-    // Channel আগে ভুলভাবে create হলে toggle কাজ করবে না
-    // mismatch হলে delete করে recreate করি
-    val existing = nm.getNotificationChannel(channelId)
-    if (existing != null) {
-        val existingHasSound = existing.sound != null
-        val existingHasVib = existing.shouldVibrate()
-
-        val needRecreate = (existingHasSound != soundOn) || (existingHasVib != vibrateOn)
-        if (needRecreate) {
-            nm.deleteNotificationChannel(channelId)
-        } else {
-            return
-        }
+    try {
+        nm.deleteNotificationChannel(channelId)
+    } catch (_: Throwable) {
     }
 
     val ch = NotificationChannel(
@@ -1063,22 +1062,16 @@ fun ensureNotificationChannel(
         NotificationManager.IMPORTANCE_HIGH
     ).apply {
         description = channelDesc
+        enableLights(true)
+        lightColor = android.graphics.Color.GREEN
+        enableVibration(false)
+        vibrationPattern = longArrayOf()
+        setSound(null, null)
+        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         setShowBadge(true)
-
-        if (soundOn) {
-            // Alarm tone ব্যবহার করলে Alarm volume follow করবে
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            val attrs = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ALARM)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build()
-            setSound(uri, attrs)
-        } else {
-            setSound(null, null)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            setAllowBubbles(false)
         }
-
-        enableVibration(vibrateOn)
-        if (vibrateOn && vibPattern.isNotEmpty()) vibrationPattern = vibPattern
     }
 
     nm.createNotificationChannel(ch)

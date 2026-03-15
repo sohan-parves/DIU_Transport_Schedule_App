@@ -87,6 +87,7 @@ import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -389,19 +390,6 @@ fun ProfileScreen(vm: HomeViewModel) {
         mutableStateOf(alertPrefs.getBoolean("alarm_vibrate_5m", true))
     }
 
-    LaunchedEffect(selectedRoute, notificationsEnabled, isFriday) {
-        val isAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
-        val shouldEnableExtras = notificationsEnabled && !isAll && !isFriday
-
-        alarmSound5mEnabled = shouldEnableExtras
-        alarmVibrate5mEnabled = shouldEnableExtras
-
-        alertPrefs.edit()
-            .putBoolean("alarm_sound_5m", shouldEnableExtras)
-            .putBoolean("alarm_vibrate_5m", shouldEnableExtras)
-            .apply()
-    }
-
     var customVibrationPattern by rememberSaveable {
         mutableStateOf(alertPrefs.getString("custom_vibration_pattern", "Default vibration") ?: "Default vibration")
     }
@@ -429,8 +417,19 @@ fun ProfileScreen(vm: HomeViewModel) {
     val compactMode by vm.compactMode.collectAsState()
     var showReloadPopup by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(isSyncing) {
+    LaunchedEffect(isSyncing, showReloadPopup) {
+        if (!showReloadPopup) return@LaunchedEffect
+
         if (!isSyncing) {
+            delay(800)
+            if (!isSyncing) {
+                showReloadPopup = false
+            }
+            return@LaunchedEffect
+        }
+
+        delay(20000)
+        if (showReloadPopup && isSyncing) {
             showReloadPopup = false
         }
     }

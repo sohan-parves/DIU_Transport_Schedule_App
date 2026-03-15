@@ -9,6 +9,8 @@ import kotlinx.coroutines.withContext
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.views.overlay.Polyline
 import java.util.Locale
+import org.json.JSONArray
+import org.json.JSONObject
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -35,7 +37,7 @@ import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import java.io.File
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.graphics.luminance
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -144,10 +146,158 @@ private object RouteScheduleMemoryCache {
     }
 }
 
+private const val PREF_MAP_CACHE = "map_route_cache"
+private const val KEY_MAP_CACHE_VERSION = "map_cache_version"
+private const val KEY_CACHED_SCHEDULE_ENTRIES = "cached_schedule_entries_json"
+private const val KEY_ROUTE_CACHE_PREFIX = "route_cache_"
+
+private fun readCachedMapVersion(ctx: Context): Long {
+    return ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
+        .getLong(KEY_MAP_CACHE_VERSION, 0L)
+}
+
+private fun saveCachedMapVersion(ctx: Context, version: Long) {
+    ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
+        .edit()
+        .putLong(KEY_MAP_CACHE_VERSION, version)
+        .apply()
+}
+
+private fun clearPersistentRouteMapCache(ctx: Context) {
+    val prefs = ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
+    val editor = prefs.edit()
+    prefs.all.keys
+        .filter { key -> key.startsWith(KEY_ROUTE_CACHE_PREFIX) }
+        .forEach { key -> editor.remove(key) }
+    editor.apply()
+}
+
+private fun saveCachedScheduleEntries(ctx: Context, entries: List<Map<*, *>>) {
+    try {
+        val arr = JSONArray()
+        entries.forEach { entry ->
+            val obj = JSONObject()
+            entry.forEach { (k, v) ->
+                if (k != null) obj.put(k.toString(), JSONObject.wrap(v))
+            }
+            arr.put(obj)
+        }
+        ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_CACHED_SCHEDULE_ENTRIES, arr.toString())
+            .apply()
+    } catch (_: Throwable) {
+    }
+}
+
+private fun readCachedScheduleEntries(ctx: Context): List<Map<String, Any?>> {
+    return try {
+        val raw = ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
+            .getString(KEY_CACHED_SCHEDULE_ENTRIES, "[]") ?: "[]"
+        val arr = JSONArray(raw)
+        buildList {
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val map = linkedMapOf<String, Any?>()
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    map[key] = obj.opt(key)
+                }
+                add(map)
+            }
+        }
+    } catch (_: Throwable) {
+        emptyList()
+    }
+}
+
+private fun geoPointsToJson(points: List<GeoPoint>): JSONArray {
+    val arr = JSONArray()
+    points.forEach { point ->
+        arr.put(
+            JSONObject().apply {
+                put("lat", point.latitude)
+                put("lng", point.longitude)
+            }
+        )
+    }
+    return arr
+}
+
+private fun labelsToJson(labels: List<String>): JSONArray {
+    val arr = JSONArray()
+    labels.forEach { arr.put(it) }
+    return arr
+}
+
+private fun jsonToGeoPoints(arr: JSONArray?): List<GeoPoint> {
+    if (arr == null) return emptyList()
+    return buildList {
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val lat = obj.optDouble("lat", Double.NaN)
+            val lng = obj.optDouble("lng", Double.NaN)
+            if (!lat.isNaN() && !lng.isNaN()) add(GeoPoint(lat, lng))
+        }
+    }
+}
+
+private fun jsonToLabels(arr: JSONArray?): List<String> {
+    if (arr == null) return emptyList()
+    return buildList {
+        for (i in 0 until arr.length()) {
+            val value = arr.optString(i).trim()
+            if (value.isNotBlank()) add(value)
+        }
+    }
+}
+
+private fun savePersistentRouteMapCache(ctx: Context, data: CachedRouteMapData) {
+    try {
+        val obj = JSONObject().apply {
+            put("routeNo", data.routeNo)
+            put("routeName", data.routeName)
+            put("routeDetails", data.routeDetails)
+            put("routePoints", geoPointsToJson(data.routePoints))
+            put("routePointLabels", labelsToJson(data.routePointLabels))
+            put("routeStopMarkerPoints", geoPointsToJson(data.routeStopMarkerPoints))
+            put("routeStopMarkerLabels", labelsToJson(data.routeStopMarkerLabels))
+            put("hasRealRoadPolyline", data.hasRealRoadPolyline)
+        }
+        ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_ROUTE_CACHE_PREFIX + data.routeNo.trim().uppercase(Locale.getDefault()), obj.toString())
+            .apply()
+    } catch (_: Throwable) {
+    }
+}
+
+private fun readPersistentRouteMapCache(ctx: Context, routeNo: String): CachedRouteMapData? {
+    return try {
+        val raw = ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
+            .getString(KEY_ROUTE_CACHE_PREFIX + routeNo.trim().uppercase(Locale.getDefault()), null)
+            ?: return null
+        val obj = JSONObject(raw)
+        CachedRouteMapData(
+            routeNo = obj.optString("routeNo", routeNo),
+            routeName = obj.optString("routeName", ""),
+            routeDetails = obj.optString("routeDetails", ""),
+            routePoints = jsonToGeoPoints(obj.optJSONArray("routePoints")),
+            routePointLabels = jsonToLabels(obj.optJSONArray("routePointLabels")),
+            routeStopMarkerPoints = jsonToGeoPoints(obj.optJSONArray("routeStopMarkerPoints")),
+            routeStopMarkerLabels = jsonToLabels(obj.optJSONArray("routeStopMarkerLabels")),
+            hasRealRoadPolyline = obj.optBoolean("hasRealRoadPolyline", false)
+        )
+    } catch (_: Throwable) {
+        null
+    }
+}
+
 @Composable
 fun LiveMapScreen() {
     val ctx = LocalContext.current
-    val isDark = isSystemInDarkTheme()
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
     // --- Permission state & launcher
     var hasLocationPermission by remember {
@@ -191,6 +341,8 @@ fun LiveMapScreen() {
 
     val workManager = remember { WorkManager.getInstance(ctx) }
     val firestore = remember { FirebaseFirestore.getInstance() }
+    var mapVersionChecked by remember { mutableStateOf(false) }
+    var mapCacheVersion by remember { mutableLongStateOf(readCachedMapVersion(ctx)) }
 
     suspend fun geocodeRoutePoints(rawText: String): Pair<List<GeoPoint>, List<String>> {
         val cleaned = rawText.trim()
@@ -312,6 +464,43 @@ fun LiveMapScreen() {
         }
     }
 
+    fun extractStopLabelsFromScheduleStops(raw: Any?): List<String> {
+        val items = raw as? List<*> ?: return emptyList()
+        return items.mapNotNull { row ->
+            when (row) {
+                is Map<*, *> -> row["name"]?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                else -> row?.toString()?.trim()?.takeIf { it.isNotBlank() }
+            }
+        }
+    }
+
+    fun mergePreferredLabels(vararg labelLists: List<String>): List<String> {
+        return labelLists.firstOrNull { it.isNotEmpty() } ?: emptyList()
+    }
+
+    fun buildPointLabelsFromStops(
+        polylinePoints: List<GeoPoint>,
+        stopMarkerPoints: List<GeoPoint>,
+        stopMarkerLabels: List<String>
+    ): List<String> {
+        if (polylinePoints.isEmpty() || stopMarkerPoints.isEmpty() || stopMarkerLabels.isEmpty()) return emptyList()
+
+        fun distanceSquared(a: GeoPoint, b: GeoPoint): Double {
+            val dLat = a.latitude - b.latitude
+            val dLng = a.longitude - b.longitude
+            return dLat * dLat + dLng * dLng
+        }
+
+        return polylinePoints.map { point ->
+            val nearestIndex = stopMarkerPoints.indices.minByOrNull { index ->
+                distanceSquared(point, stopMarkerPoints[index])
+            } ?: -1
+
+            stopMarkerLabels.getOrNull(nearestIndex)?.trim()?.takeIf { it.isNotBlank() }
+                ?: "Point"
+        }
+    }
+
     fun extractStopLabelsFromStopNames(raw: Any?): List<String> {
         val items = raw as? List<*> ?: return emptyList()
         return items.mapNotNull { it?.toString()?.trim()?.takeIf { name -> name.isNotBlank() } }
@@ -368,7 +557,7 @@ fun LiveMapScreen() {
     }
 
     LaunchedEffect(routeId) {
-        if (routeId.isBlank()) {
+        if (routeId.isBlank() || routeId.trim().equals("ALL", ignoreCase = true)) {
             routePoints = emptyList()
             routePointLabels = emptyList()
             routeStopMarkerPoints = emptyList()
@@ -391,9 +580,32 @@ fun LiveMapScreen() {
         routeStopMarkerLabels = emptyList()
         routeHasRealRoadPolyline = false
 
+        if (!mapVersionChecked) {
+            try {
+                val remoteVersion = firestore
+                    .collection("meta")
+                    .document("route_maps")
+                    .get()
+                    .await()
+                    .getLong("version") ?: 0L
+
+                if (remoteVersion > mapCacheVersion) {
+                    clearPersistentRouteMapCache(ctx)
+                    saveCachedMapVersion(ctx, remoteVersion)
+                    mapCacheVersion = remoteVersion
+                }
+            } catch (_: Exception) {
+            } finally {
+                mapVersionChecked = true
+            }
+        }
+
         // --- Cache-first block ---
         val normalizedRouteId = normalizeRouteNo(routeId)
         val cached = RouteMapMemoryCache.get(normalizedRouteId)
+            ?: readPersistentRouteMapCache(ctx, normalizedRouteId)?.also {
+                RouteMapMemoryCache.put(it)
+            }
         if (cached != null) {
             routeNameFromDb = cached.routeName
             routeDetails = cached.routeDetails
@@ -409,15 +621,24 @@ fun LiveMapScreen() {
 
         try {
             val entries = RouteScheduleMemoryCache.get() ?: run {
-                val snapshot = firestore
-                    .collection("schedules")
-                    .document("current")
-                    .collection("data")
-                    .document("items")
-                    .get()
-                    .await()
+                val persisted = readCachedScheduleEntries(ctx)
+                if (persisted.isNotEmpty()) {
+                    RouteScheduleMemoryCache.put(persisted)
+                    persisted
+                } else {
+                    val snapshot = firestore
+                        .collection("schedules")
+                        .document("current")
+                        .collection("data")
+                        .document("items")
+                        .get()
+                        .await()
 
-                collectRouteEntries(snapshot.data).also { RouteScheduleMemoryCache.put(it) }
+                    collectRouteEntries(snapshot.data).also {
+                        RouteScheduleMemoryCache.put(it)
+                        saveCachedScheduleEntries(ctx, it)
+                    }
+                }
             }
 
             val wantedRouteNo = normalizedRouteId
@@ -443,10 +664,6 @@ fun LiveMapScreen() {
             }
 
             routeDetails = matched.get("routeDetails")?.toString()?.trim().orEmpty()
-            routeNameFromDb = matched.get("routeName")?.toString()?.trim().orEmpty()
-            if (routeNameFromDb.isBlank() && routeText.isNotBlank()) {
-                routeNameFromDb = routeText.substringAfter("—", routeText).trim()
-            }
 
             val routeMapSnapshot = firestore
                 .collection("route_maps")
@@ -457,6 +674,15 @@ fun LiveMapScreen() {
                 .await()
 
             val routeMapData = routeMapSnapshot.data
+
+            val routeNameFromMapDoc = routeMapData?.get("routeName")?.toString()?.trim().orEmpty()
+            val routeNameFromSchedule = matched.get("routeName")?.toString()?.trim().orEmpty()
+            routeNameFromDb = when {
+                routeNameFromMapDoc.isNotBlank() -> routeNameFromMapDoc
+                routeNameFromSchedule.isNotBlank() -> routeNameFromSchedule
+                routeText.isNotBlank() -> routeText.substringAfter("—", routeText).trim()
+                else -> ""
+            }
 
             val adminAnchorPolylinePoints = extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolylineAnchors"))
             val roadPolylinePoints = extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolyline"))
@@ -477,11 +703,19 @@ fun LiveMapScreen() {
             }
             val stopLabelsFromStops = extractStopLabelsFromStops(routeMapData?.get("routeStops"))
             val stopLabelsFromNames = extractStopLabelsFromStopNames(routeMapData?.get("routeStopNames"))
-            val stopLabels = if (stopLabelsFromStops.isNotEmpty()) stopLabelsFromStops else stopLabelsFromNames
+            val stopLabelsFromScheduleStops = extractStopLabelsFromScheduleStops(matched.get("routeStops"))
+            val stopLabels = mergePreferredLabels(
+                stopLabelsFromStops,
+                stopLabelsFromNames,
+                stopLabelsFromScheduleStops
+            )
             val stopMarkerPoints = when {
                 stopPoints.isNotEmpty() -> stopPoints
                 adminAnchorPolylinePoints.isNotEmpty() && stopLabels.isNotEmpty() -> {
                     adminAnchorPolylinePoints.take(stopLabels.size)
+                }
+                rawPolylinePoints.isNotEmpty() && stopLabels.isNotEmpty() -> {
+                    rawPolylinePoints.take(stopLabels.size)
                 }
                 else -> emptyList()
             }
@@ -489,7 +723,14 @@ fun LiveMapScreen() {
 
             when {
                 polylinePoints.isNotEmpty() -> {
+                    val resolvedStopMarkerLabels = when {
+                        stopMarkerLabels.isNotEmpty() -> stopMarkerLabels
+                        stopLabels.isNotEmpty() && stopMarkerPoints.isNotEmpty() -> stopLabels.take(stopMarkerPoints.size)
+                        else -> emptyList()
+                    }
                     val labels = when {
+                        resolvedStopMarkerLabels.isNotEmpty() && stopMarkerPoints.isNotEmpty() ->
+                            buildPointLabelsFromStops(polylinePoints, stopMarkerPoints, resolvedStopMarkerLabels)
                         stopLabels.isNotEmpty() && polylinePoints.size == stopLabels.size -> stopLabels
                         useAdminAnchorPolyline && !useRoadPolyline -> polylinePoints.indices.map { "Selected point ${it + 1}" }
                         else -> polylinePoints.indices.map { "Point ${it + 1}" }
@@ -497,22 +738,22 @@ fun LiveMapScreen() {
                     routePoints = polylinePoints
                     routePointLabels = labels
                     routeStopMarkerPoints = stopMarkerPoints
-                    routeStopMarkerLabels = stopMarkerLabels
+                    routeStopMarkerLabels = resolvedStopMarkerLabels
                     routeHasRealRoadPolyline = useRoadPolyline || adminAnchorPolylinePoints.size >= 2 || stopPoints.size >= 2
                     routeLoading = false
                     routeLoadError = ""
-                    RouteMapMemoryCache.put(
-                        CachedRouteMapData(
-                            routeNo = wantedRouteNo,
-                            routeName = routeNameFromDb,
-                            routeDetails = routeDetails,
-                            routePoints = polylinePoints,
-                            routePointLabels = labels,
-                            routeStopMarkerPoints = stopMarkerPoints,
-                            routeStopMarkerLabels = stopMarkerLabels,
-                            hasRealRoadPolyline = useRoadPolyline || adminAnchorPolylinePoints.size >= 2 || stopPoints.size >= 2
-                        )
+                    val cacheData = CachedRouteMapData(
+                        routeNo = wantedRouteNo,
+                        routeName = routeNameFromDb,
+                        routeDetails = routeDetails,
+                        routePoints = polylinePoints,
+                        routePointLabels = labels,
+                        routeStopMarkerPoints = stopMarkerPoints,
+                        routeStopMarkerLabels = resolvedStopMarkerLabels,
+                        hasRealRoadPolyline = useRoadPolyline || adminAnchorPolylinePoints.size >= 2 || stopPoints.size >= 2
                     )
+                    RouteMapMemoryCache.put(cacheData)
+                    savePersistentRouteMapCache(ctx, cacheData)
                 }
                 routeDetails.isNotBlank() -> {
                     val (points, labels) = geocodeRoutePoints(routeDetails)
@@ -526,18 +767,18 @@ fun LiveMapScreen() {
                         routeLoadError = "Could not map route details for $routeId"
                     } else {
                         routeLoadError = ""
-                        RouteMapMemoryCache.put(
-                            CachedRouteMapData(
-                                routeNo = wantedRouteNo,
-                                routeName = routeNameFromDb,
-                                routeDetails = routeDetails,
-                                routePoints = points,
-                                routePointLabels = labels,
-                                routeStopMarkerPoints = emptyList(),
-                                routeStopMarkerLabels = emptyList(),
-                                hasRealRoadPolyline = false
-                            )
+                        val cacheData = CachedRouteMapData(
+                            routeNo = wantedRouteNo,
+                            routeName = routeNameFromDb,
+                            routeDetails = routeDetails,
+                            routePoints = points,
+                            routePointLabels = labels,
+                            routeStopMarkerPoints = emptyList(),
+                            routeStopMarkerLabels = emptyList(),
+                            hasRealRoadPolyline = false
                         )
+                        RouteMapMemoryCache.put(cacheData)
+                        savePersistentRouteMapCache(ctx, cacheData)
                     }
                 }
                 else -> {
@@ -620,11 +861,13 @@ fun LiveMapScreen() {
             centerOnUserRequest = requestCenterOnUser,
             onCenterConsumed = { requestCenterOnUser = false }
         )
-        val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-        val topCardBg = if (isDark) Color(0xFF0B2A66) else Color.White
+        val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+        // Status bar theme colors
+        val topCardBg = if (isDark) Color(0xFF0A1F44) else Color.White   // deep blue in dark mode
         val topCardBorder = if (isDark) Color.Transparent else Color(0xFFE5E7EB)
+
         val topPrimaryText = if (isDark) Color.White else Color(0xFF111111)
-        val topSecondaryText = if (isDark) Color.White.copy(alpha = 0.96f) else Color(0xFF111111)
+        val topSecondaryText = if (isDark) Color.White else Color(0xFF111111)
         val topAccentText = if (isDark) Color.White else Color(0xFF111111)
 
         // Show currently selected road/filter on top

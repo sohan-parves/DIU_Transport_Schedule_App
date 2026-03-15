@@ -7,6 +7,7 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.os.VibrationAttributes
 
 import android.app.AlarmManager
 import android.app.NotificationChannel
@@ -41,6 +42,7 @@ import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
 
 private const val ACTION_STOP_RUNNING_ALERT_INTERNAL = "com.sohan.diutransportschedule.ACTION_STOP_RUNNING_ALERT_INTERNAL"
+private const val ACTION_TAP_OPEN_AND_STOP = "com.sohan.diutransportschedule.ACTION_TAP_OPEN_AND_STOP"
 private const val ALERT_STOP_REQ_CODE = 9077
 
 const val EXTRA_AT_MS = "com.sohan.diutransportschedule.EXTRA_AT_MS"
@@ -92,13 +94,30 @@ private fun isReceiverDisplayConsistentWithSource(sourceToken: String, displayTi
     return sourceMeridiem == displayMeridiem
 }
 
-private object RunningAlertController {
+object RunningAlertController {
     private var ringtone: Ringtone? = null
     private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var vibrating = false
+    private var isAlertRunning = false
+    private var lastStartElapsedMs = 0L
+    private var currentSessionId = 0L
+    private var lastAlertKey = ""
+    private var lastAlertKeyWallMs = 0L
+    private const val START_GUARD_WINDOW_MS = 7000L
+    private const val SAME_ALERT_KEY_WINDOW_MS = 30000L
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var localStopRunnable: Runnable? = null
+
+    fun isRunning(): Boolean = isAlertRunning
 
     fun stop(context: Context) {
+        try {
+            localStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        } catch (_: Throwable) {
+        }
+        localStopRunnable = null
+
         try {
             ringtone?.stop()
         } catch (_: Throwable) {
@@ -120,6 +139,13 @@ private object RunningAlertController {
         }
         vibrator = null
         vibrating = false
+        isAlertRunning = false
+        lastStartElapsedMs = 0L
+        currentSessionId = 0L
+        mainHandler.postDelayed({
+            lastAlertKey = ""
+            lastAlertKeyWallMs = 0L
+        }, SAME_ALERT_KEY_WINDOW_MS)
 
         // Cancel auto-stop alarm if any
         try {
@@ -143,9 +169,50 @@ private object RunningAlertController {
         }
     }
 
-    fun start(context: Context, soundOn: Boolean, vibrateOn: Boolean, durationMs: Long) {
-        // Ensure only one running alert at a time
+    fun start(
+        context: Context,
+        soundOn: Boolean,
+        vibrateOn: Boolean,
+        durationMs: Long,
+        alertKey: String
+    ) {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val nowWall = System.currentTimeMillis()
+        val normalizedAlertKey = alertKey.trim()
+
+        // Stronger guard: if the same logical alert arrives again shortly after the first one,
+        // never start sound/vibration a second time.
+        if (
+            normalizedAlertKey.isNotBlank() &&
+            lastAlertKey == normalizedAlertKey &&
+            (nowWall - lastAlertKeyWallMs) < SAME_ALERT_KEY_WINDOW_MS
+        ) {
+            Log.w(
+                "ScheduleAlarmReceiver",
+                "Ignoring duplicate RunningAlertController.start for same alertKey within ${SAME_ALERT_KEY_WINDOW_MS}ms key=$normalizedAlertKey"
+            )
+            return
+        }
+
+        // Hard guard: if the same alert flow calls start twice within a few seconds,
+        // ignore the second start so ringtone/vibration cannot double-trigger.
+        if (isAlertRunning && (nowElapsed - lastStartElapsedMs) < START_GUARD_WINDOW_MS) {
+            Log.w(
+                "ScheduleAlarmReceiver",
+                "Ignoring duplicate RunningAlertController.start within ${START_GUARD_WINDOW_MS}ms"
+            )
+            return
+        }
+
+        // Ensure only one running alert at a time when this is a genuine new alert.
         stop(context)
+        lastStartElapsedMs = nowElapsed
+        if (normalizedAlertKey.isNotBlank()) {
+            lastAlertKey = normalizedAlertKey
+            lastAlertKeyWallMs = nowWall
+        }
+        val newSessionId = System.currentTimeMillis()
+        currentSessionId = newSessionId
 
         if (soundOn) {
             try {
@@ -197,6 +264,24 @@ private object RunningAlertController {
             ringtone = null
         }
 
+        isAlertRunning = soundOn || vibrateOn
+
+        // Local in-process fallback auto-stop.
+        // This protects against rare cases where the AlarmManager auto-stop broadcast is delayed,
+        // blocked by OEM background restrictions, or the notification is tapped while audio is still active.
+        localStopRunnable = Runnable {
+            if (currentSessionId == newSessionId) {
+                try {
+                    stop(context.applicationContext)
+                } catch (_: Throwable) {
+                }
+            }
+        }
+        try {
+            mainHandler.postDelayed(localStopRunnable!!, durationMs)
+        } catch (_: Throwable) {
+        }
+
         if (vibrateOn) {
             try {
                 vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -208,14 +293,21 @@ private object RunningAlertController {
                 }
 
                 val pattern = longArrayOf(0, 500, 250, 900, 250, 500, 400, 1200)
-                val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    VibrationEffect.createWaveform(pattern, 0) // loop
-                } else {
-                    null
-                }
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    vibrator?.vibrate(effect)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val effect = VibrationEffect.createWaveform(pattern, 0) // loop
+                    val vibrationAttributes = VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM)
+                    vibrator?.vibrate(effect, vibrationAttributes)
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val effect = VibrationEffect.createWaveform(pattern, 0) // loop
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(
+                        effect,
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
                 } else {
                     @Suppress("DEPRECATION")
                     vibrator?.vibrate(pattern, 0)
@@ -225,7 +317,7 @@ private object RunningAlertController {
             } catch (t: Throwable) {
                 Log.e("ScheduleAlarmReceiver", "Failed to vibrate", t)
             }
-        }else {
+        } else {
             try {
                 vibrator?.cancel()
             } catch (_: Throwable) {
@@ -269,60 +361,72 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        // --- Hard duplicate guard: some devices fire the same broadcast twice within milliseconds ---
-        val nowElapsed = SystemClock.elapsedRealtime()
-        while (true) {
-            val previousElapsed = lastHandledElapsedMs.get()
-            if (nowElapsed - previousElapsed < DUPLICATE_GUARD_WINDOW_MS) {
-                Log.w(
-                    "ScheduleAlarmReceiver",
-                    "Duplicate alarm broadcast ignored within ${DUPLICATE_GUARD_WINDOW_MS}ms window"
-                )
-                return
-            }
-            if (lastHandledElapsedMs.compareAndSet(previousElapsed, nowElapsed)) {
-                break
+        val action = intent.action
+
+        // Never block user stop/open actions with the duplicate guard.
+        // Otherwise, if the user taps the notification immediately after it appears,
+        // some devices may ignore the tap because it lands inside the guard window.
+        if (
+            action != ACTION_STOP_SCHEDULE_ALARM &&
+            action != ACTION_STOP_RUNNING_ALERT_INTERNAL &&
+            action != ACTION_TAP_OPEN_AND_STOP
+        ) {
+            // --- Hard duplicate guard: some devices fire the same broadcast twice within milliseconds ---
+            val nowElapsed = SystemClock.elapsedRealtime()
+            while (true) {
+                val previousElapsed = lastHandledElapsedMs.get()
+                if (nowElapsed - previousElapsed < DUPLICATE_GUARD_WINDOW_MS) {
+                    Log.w(
+                        "ScheduleAlarmReceiver",
+                        "Duplicate alarm broadcast ignored within ${DUPLICATE_GUARD_WINDOW_MS}ms window"
+                    )
+                    return
+                }
+                if (lastHandledElapsedMs.compareAndSet(previousElapsed, nowElapsed)) {
+                    break
+                }
             }
         }
-        // Stop action: stop ONLY the currently running sound/vibration + hide current notification
-        // (do NOT cancel future alarms)
-        if (intent.action == ACTION_STOP_SCHEDULE_ALARM) {
+        // Stop button action: stop ONLY the currently running sound/vibration + hide current notification.
+        // Do NOT open the app and do NOT cancel future alarms.
+        if (action == ACTION_STOP_SCHEDULE_ALARM) {
             RunningAlertController.stop(context)
             NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+            return
+        }
 
-            // If user tapped the notification body, we still want to open the app
-            // but stop ONLY this running alert.
-            if (intent.getBooleanExtra("open_app", false)) {
-                NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+        // Notification body tap: stop the current alert, hide the notification, then open the app.
+        if (action == ACTION_TAP_OPEN_AND_STOP) {
+            RunningAlertController.stop(context.applicationContext)
+            NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
 
-                val launch = Intent(context, MainActivity::class.java).apply {
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                            Intent.FLAG_ACTIVITY_SINGLE_TOP
-                    )
-                    putExtra("from_alarm_notification", true)
-                }
+            val launch = Intent(context, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
+                putExtra("from_alarm_notification", true)
+            }
 
-                try {
-                    context.startActivity(launch)
-                } catch (t: Throwable) {
-                    Log.e("ScheduleAlarmReceiver", "Failed to open app from notification tap", t)
-                    val fallbackLaunch = context.packageManager
-                        .getLaunchIntentForPackage(context.packageName)
-                        ?.apply {
-                            addFlags(
-                                Intent.FLAG_ACTIVITY_NEW_TASK or
-                                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                                    Intent.FLAG_ACTIVITY_SINGLE_TOP
-                            )
-                            putExtra("from_alarm_notification", true)
-                        }
-                    if (fallbackLaunch != null) {
-                        try {
-                            context.startActivity(fallbackLaunch)
-                        } catch (_: Throwable) {
-                        }
+            try {
+                context.startActivity(launch)
+            } catch (t: Throwable) {
+                Log.e("ScheduleAlarmReceiver", "Failed to open app from notification tap", t)
+                val fallbackLaunch = context.packageManager
+                    .getLaunchIntentForPackage(context.packageName)
+                    ?.apply {
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        )
+                        putExtra("from_alarm_notification", true)
+                    }
+                if (fallbackLaunch != null) {
+                    try {
+                        context.startActivity(fallbackLaunch)
+                    } catch (_: Throwable) {
                     }
                 }
             }
@@ -330,8 +434,9 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         }
 
         // Internal auto-stop after 5 minutes
-        if (intent.action == ACTION_STOP_RUNNING_ALERT_INTERNAL) {
-            RunningAlertController.stop(context)
+        if (action == ACTION_STOP_RUNNING_ALERT_INTERNAL) {
+            RunningAlertController.stop(context.applicationContext)
+            NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
             return
         }
         Log.d("ScheduleAlarmReceiver", "onReceive action=${intent.action} title=${intent.getStringExtra(EXTRA_TITLE)} text=${intent.getStringExtra(EXTRA_TEXT)}")
@@ -404,15 +509,28 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         val soundOn = prefs.getBoolean(KEY_ALARM_SOUND_5M, true)
         val vibrateOn = prefs.getBoolean(KEY_ALARM_VIBRATE_5M, true)
 
-        // Always use the silent notification channel.
-        // The actual alarm sound/vibration is driven manually by RunningAlertController.
-        // This prevents double ring on Android 8+ where the notification channel can also play sound.
-        val channelId = NOTIF_CHANNEL_ID_SILENT
+        // Use a HIGH-importance channel based on the current toggle combination.
+        // The channels themselves are kept silent in ensureNotificationChannel(),
+        // so heads-up can appear without causing double ringtone/vibration.
+        val channelId = when {
+            soundOn && vibrateOn -> NOTIF_CHANNEL_ID_SOUND_VIB
+            soundOn -> NOTIF_CHANNEL_ID_SOUND_ONLY
+            vibrateOn -> NOTIF_CHANNEL_ID_VIB_ONLY
+            else -> NOTIF_CHANNEL_ID_SILENT
+        }
 
         Log.d(
             "ScheduleAlarmReceiver",
             "toggles soundOn=$soundOn vibrateOn=$vibrateOn manualAlert=true channelId=$channelId"
         )
+
+        val alertKey = buildString {
+            append(rawTitle.trim())
+            append("|")
+            append(rawText.trim())
+            append("|")
+            append(sourceToken.trim())
+        }
 
         // ✅ ensure all 4 channels exist
         ensureNotificationChannel(context, NOTIF_CHANNEL_ID_SOUND_VIB, MainActivity.NOTIF_CHANNEL_NAME, MainActivity.NOTIF_CHANNEL_DESC)
@@ -488,25 +606,28 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             }
         }.ifBlank { rawText }
 
-        // Tap on the notification body: stop ONLY this running alert + open the app.
-        // We route the tap through this receiver so we can stop sound/vibration reliably.
-        val tapIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-            action = ACTION_STOP_SCHEDULE_ALARM
-            data = Uri.parse("diu://tap_stop_open")
-            putExtra("open_app", true)
+
+        // Tap on the notification body: open the app directly.
+        // MainActivity will stop the current running alert when it sees the extra flags.
+        val tapIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("from_alarm_notification", true)
+            putExtra("stop_current_alarm", true)
         }
 
-        val contentPi = PendingIntent.getBroadcast(
+        val contentPi = PendingIntent.getActivity(
             context,
             ALARM_REQ_CODE + 21,
             tapIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or
-                (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
         // Stop action
         val stopIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-            action = ACTION_STOP_SCHEDULE_ALARM
+            setAction(ACTION_STOP_SCHEDULE_ALARM)
             data = Uri.parse("diu://stop_schedule_alarm")
         }
         val stopPi = PendingIntent.getBroadcast(
@@ -552,6 +673,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             // Expanded view
             .setStyle(
                 NotificationCompat.BigTextStyle()
+                    .setBigContentTitle(collapsedTitle)
                     .bigText(expandedBody)
                     .setSummaryText(if (routeLabel.isNotBlank()) "DIU Bus Reminder • $routeLabel" else "DIU Bus Reminder")
             )
@@ -564,14 +686,22 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(false)
             .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setSilent(true)
+            .setOnlyAlertOnce(false)
             .setDefaults(0)
 
         builder.setContentIntent(contentPi)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            builder.setFullScreenIntent(contentPi, true)
+        builder.setFullScreenIntent(contentPi, false)
+        // Do not use a full-screen intent here, otherwise some devices auto-open the app.
+        // Heads-up popup will still depend on HIGH/MAX notification importance + priority.
+        builder.setTicker(collapsedTitle)
+        builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        builder.setPriority(NotificationCompat.PRIORITY_MAX)
+        builder.setCategory(NotificationCompat.CATEGORY_ALARM)
+        builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
         }
+        builder.setTimeoutAfter(5 * 60 * 1000L)
 
         // NOTE: Don't let the Notification itself play sound/vibration.
         // We always drive sound/vibration via RunningAlertController so the user toggles work
@@ -582,15 +712,21 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         // Force 5-minute ring/vibration (independent of Android 8+ channel sound lock)
         // This makes the Profile ON/OFF toggles always work.
         val fiveMinMs = 5 * 60 * 1000L
+        val alertAlreadyRunning = intent.getBooleanExtra("alert_already_running", false)
         if (soundOn || vibrateOn) {
-            RunningAlertController.start(
-                context,
-                soundOn = soundOn,
-                vibrateOn = vibrateOn,
-                durationMs = fiveMinMs
-            )
+            if (!alertAlreadyRunning && !RunningAlertController.isRunning()) {
+                RunningAlertController.start(
+                    context.applicationContext,
+                    soundOn = soundOn,
+                    vibrateOn = vibrateOn,
+                    durationMs = fiveMinMs,
+                    alertKey = alertKey
+                )
+            } else {
+                Log.d("ScheduleAlarmReceiver", "Skipping RunningAlertController.start because alert is already running")
+            }
         } else {
-            RunningAlertController.stop(context)
+            RunningAlertController.stop(context.applicationContext)
         }
 
         // ✅ After firing this alarm, schedule the next one from the saved queue
