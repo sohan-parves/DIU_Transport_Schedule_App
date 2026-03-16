@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,7 +31,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -86,6 +86,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import androidx.compose.ui.window.Dialog
@@ -106,6 +108,7 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import com.sohan.diutransportschedule.MainActivity
 import com.sohan.diutransportschedule.ScheduleAlarmReceiver
+import com.sohan.diutransportschedule.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -152,13 +155,25 @@ fun ProfileScreen(vm: HomeViewModel) {
     }
 
     val alertPrefs = remember(ctx) { ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE) }
+    val appDefaultRingtoneUri = "android.resource://${ctx.packageName}/${R.raw.app_default_ringtone}"
+    val appDefaultRingtoneName = "App default ringtone"
+
+    LaunchedEffect(notificationsEnabled) {
+        alertPrefs.edit()
+            .putBoolean("master_notifications_enabled", notificationsEnabled)
+            .apply()
+    }
 
     var customRingtoneUri by rememberSaveable {
-        mutableStateOf(alertPrefs.getString("custom_ringtone_uri", null))
+        mutableStateOf(alertPrefs.getString("custom_ringtone_uri", appDefaultRingtoneUri) ?: appDefaultRingtoneUri)
     }
     var customRingtoneName by rememberSaveable {
-        mutableStateOf(alertPrefs.getString("custom_ringtone_name", "Default ringtone") ?: "Default ringtone")
+        mutableStateOf(alertPrefs.getString("custom_ringtone_name", appDefaultRingtoneName) ?: appDefaultRingtoneName)
     }
+    val hasPickedCustomFile =
+        !customRingtoneUri.isNullOrBlank() &&
+                customRingtoneUri != appDefaultRingtoneUri &&
+                customRingtoneName != appDefaultRingtoneName
     var showRingtonePickerPage by rememberSaveable { mutableStateOf(false) }
 
     val playPreviewVibration: (String) -> Unit = remember(ctx) {
@@ -190,6 +205,7 @@ fun ProfileScreen(vm: HomeViewModel) {
         }
     }
     var previewPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var previewingUri by remember { mutableStateOf<String?>(null) }
 
     val stopPreviewRingtone: () -> Unit = remember {
         {
@@ -202,11 +218,85 @@ fun ProfileScreen(vm: HomeViewModel) {
             } catch (_: Throwable) {
             }
             previewPlayer = null
+            previewingUri = null
         }
     }
     var presetBusyName by rememberSaveable { mutableStateOf("") }
     var presetLoadError by rememberSaveable { mutableStateOf("") }
     var presetLoadedCount by rememberSaveable { mutableStateOf(0) }
+
+    suspend fun loadPresetRingtonesFromServer(): List<Pair<String, String>> {
+        return withContext(Dispatchers.IO) {
+            val candidateUrls = listOf(
+                "https://raw.githubusercontent.com/sohan-parves/DIUtransportschedule/master/assets/ringtones/ringtones.json",
+                "https://cdn.jsdelivr.net/gh/sohan-parves/DIUtransportschedule@master/assets/ringtones/ringtones.json?ts=${System.currentTimeMillis()}"
+            )
+
+            var lastError: Throwable? = null
+
+            for (candidateUrl in candidateUrls) {
+                try {
+                    val conn = (URL(candidateUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 10000
+                        readTimeout = 10000
+                        requestMethod = "GET"
+                        useCaches = false
+                        setRequestProperty("Accept", "application/json,text/plain,*/*")
+                        setRequestProperty("Cache-Control", "no-cache")
+                        setRequestProperty("Pragma", "no-cache")
+                        setRequestProperty("User-Agent", "Mozilla/5.0 (Android)")
+                    }
+
+                    val code = conn.responseCode
+                    if (code !in 200..299) {
+                        throw IllegalStateException("Preset load failed (HTTP $code)")
+                    }
+
+                    val raw = conn.inputStream.bufferedReader().use { it.readText() }.trim()
+                    if (!raw.startsWith("[")) {
+                        throw IllegalStateException("Preset response was not JSON array")
+                    }
+
+                    val arr = JSONArray(raw)
+                    val parsed = List(arr.length()) { i ->
+                        val obj = arr.getJSONObject(i)
+                        val name = obj.optString("name").trim()
+                        val url = obj.optString("url").trim()
+                        name to url
+                    }.filter { it.first.isNotBlank() && it.second.isNotBlank() }
+
+                    return@withContext parsed
+                } catch (t: Throwable) {
+                    lastError = t
+                }
+            }
+
+            if (lastError != null) throw lastError
+            emptyList()
+        }
+    }
+
+    fun buildRawGitHubRingtoneUrl(displayName: String, remoteUrl: String): String {
+        val ext = remoteUrl
+            .substringAfterLast('/', "")
+            .substringAfterLast('.', "mp3")
+            .substringBefore('?')
+            .ifBlank { "mp3" }
+
+        val fileName = when {
+            remoteUrl.contains("/assets/ringtones/", ignoreCase = true) -> {
+                remoteUrl.substringAfterLast('/').substringBefore('?').ifBlank {
+                    "${displayName.trim().ifBlank { "preset_ringtone" }}.$ext"
+                }
+            }
+            else -> "${displayName.trim().ifBlank { "preset_ringtone" }}.$ext"
+        }
+
+        val encodedFileName = URLEncoder.encode(fileName, StandardCharsets.UTF_8.toString())
+            .replace("+", "%20")
+
+        return "https://raw.githubusercontent.com/sohan-parves/DIUtransportschedule/master/assets/ringtones/$encodedFileName"
+    }
 
     suspend fun downloadPresetRingtoneToCache(remoteUrl: String, displayName: String): String? {
         return withContext(Dispatchers.IO) {
@@ -228,21 +318,46 @@ fun ProfileScreen(vm: HomeViewModel) {
                 val outFile = File(dir, "$safeBase.$ext")
 
                 if (!outFile.exists() || outFile.length() <= 0L) {
-                    val conn = (URL(remoteUrl).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 12000
-                        readTimeout = 12000
-                        requestMethod = "GET"
-                    }
+                    val candidateUrls = listOf(
+                        remoteUrl,
+                        buildRawGitHubRingtoneUrl(displayName, remoteUrl)
+                    ).distinct()
 
-                    val code = conn.responseCode
-                    if (code !in 200..299) {
-                        throw IllegalStateException("Preset download failed (HTTP $code)")
-                    }
+                    var copied = false
+                    var lastError: Throwable? = null
 
-                    conn.inputStream.use { input ->
-                        FileOutputStream(outFile).use { output ->
-                            input.copyTo(output)
+                    for (candidateUrl in candidateUrls) {
+                        try {
+                            val conn = (URL(candidateUrl).openConnection() as HttpURLConnection).apply {
+                                connectTimeout = 12000
+                                readTimeout = 12000
+                                requestMethod = "GET"
+                                useCaches = false
+                                setRequestProperty("Cache-Control", "no-cache")
+                                setRequestProperty("Pragma", "no-cache")
+                                setRequestProperty("User-Agent", "Mozilla/5.0 (Android)")
+                            }
+
+                            val code = conn.responseCode
+                            if (code !in 200..299) {
+                                throw IllegalStateException("Preset download failed (HTTP $code)")
+                            }
+
+                            conn.inputStream.use { input ->
+                                FileOutputStream(outFile).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+
+                            copied = true
+                            break
+                        } catch (t: Throwable) {
+                            lastError = t
                         }
+                    }
+
+                    if (!copied) {
+                        throw (lastError ?: IllegalStateException("Preset download failed"))
                     }
                 }
 
@@ -253,18 +368,17 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val playPreviewRingtone: (String?) -> Unit = remember(ctx, customRingtoneUri) {
         { uriString ->
-            val target = uriString?.takeIf { it.isNotBlank() } ?: customRingtoneUri
+            val target = uriString?.takeIf { it.isNotBlank() } ?: customRingtoneUri ?: appDefaultRingtoneUri
+            // Toggle: same ringtone → stop
+            if (previewingUri == target && previewPlayer != null) {
+                stopPreviewRingtone()
+                previewingUri = null
+                return@remember
+            }
             if (target.isNullOrBlank()) return@remember
 
-            try {
-                previewPlayer?.stop()
-            } catch (_: Throwable) {
-            }
-            try {
-                previewPlayer?.release()
-            } catch (_: Throwable) {
-            }
-            previewPlayer = null
+            // Ensure any previous preview is fully stopped before playing a new one
+            stopPreviewRingtone()
 
             runCatching {
                 val mp = MediaPlayer().apply {
@@ -287,6 +401,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                     start()
                 }
                 previewPlayer = mp
+                previewingUri = target
             }
         }
     }
@@ -302,6 +417,7 @@ fun ProfileScreen(vm: HomeViewModel) {
             } catch (_: Throwable) {
             }
             previewPlayer = null
+            previewingUri = null
         }
     }
 
@@ -338,6 +454,23 @@ fun ProfileScreen(vm: HomeViewModel) {
             showToggleMessage("Custom ringtone selected: $pickedName")
         }
     }
+    LaunchedEffect(Unit) {
+        val savedUri = alertPrefs.getString("custom_ringtone_uri", null)
+        val savedName = alertPrefs.getString("custom_ringtone_name", null)
+        if (savedUri.isNullOrBlank() || savedName.isNullOrBlank()) {
+            customRingtoneUri = appDefaultRingtoneUri
+            customRingtoneName = appDefaultRingtoneName
+            alertPrefs.edit()
+                .putString("custom_ringtone_uri", appDefaultRingtoneUri)
+                .putString("custom_ringtone_name", appDefaultRingtoneName)
+                .apply()
+        }
+    }
+    LaunchedEffect(showRingtonePickerPage) {
+        if (!showRingtonePickerPage) {
+            stopPreviewRingtone()
+        }
+    }
     val hostedRingtones by produceState(
         initialValue = emptyList<Pair<String, String>>(),
         key1 = showRingtonePickerPage
@@ -349,37 +482,15 @@ fun ProfileScreen(vm: HomeViewModel) {
             return@produceState
         }
 
-        value = withContext(Dispatchers.IO) {
-            runCatching {
-                val conn = (URL("https://cdn.jsdelivr.net/gh/sohan-parves/DIUtransportschedule@master/assets/ringtones/ringtones.json").openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 8000
-                    readTimeout = 8000
-                    requestMethod = "GET"
-                    useCaches = false
-                    setRequestProperty("Accept", "application/json,text/plain,*/*")
-                    setRequestProperty("User-Agent", "Mozilla/5.0 (Android)")
-                }
-                val code = conn.responseCode
-                if (code !in 200..299) {
-                    throw IllegalStateException("Preset load failed (HTTP $code)")
-                }
-                val raw = conn.inputStream.bufferedReader().use { it.readText() }.trim()
-                if (!raw.startsWith("[")) {
-                    throw IllegalStateException("Preset response was not JSON array")
-                }
-                val arr = JSONArray(raw)
-                List(arr.length()) { i ->
-                    val obj = arr.getJSONObject(i)
-                    obj.getString("name").trim() to obj.getString("url").trim()
-                }.filter { it.first.isNotBlank() && it.second.isNotBlank() }
-            }.onSuccess {
-                presetLoadError = if (it.isEmpty()) "No preset ringtone found from server" else ""
-                presetLoadedCount = it.size
-            }.onFailure {
-                presetLoadError = it.message ?: "Failed to load preset ringtones"
-                presetLoadedCount = 0
-            }.getOrElse { emptyList() }
-        }
+        value = runCatching {
+            loadPresetRingtonesFromServer()
+        }.onSuccess {
+            presetLoadError = if (it.isEmpty()) "No preset ringtone found from server" else ""
+            presetLoadedCount = it.size
+        }.onFailure {
+            presetLoadError = it.message ?: "Failed to load preset ringtones"
+            presetLoadedCount = 0
+        }.getOrElse { emptyList() }
     }
 
     var alarmSound5mEnabled by rememberSaveable {
@@ -848,31 +959,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                     }
 
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Compact cards",
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                            Text(
-                                text = "Smaller padding for faster scrolling (UI only)",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Switch(
-                            checked = compactMode,
-                            onCheckedChange = {
-                                vm.setCompactMode(it)
-                                showToggleMessage(if (it) "Compact cards ON" else "Compact cards OFF")
-                            },
-                            colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
-                        )
-                    }
 
                     HorizontalDivider(color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider)
 
@@ -1009,8 +1095,45 @@ fun ProfileScreen(vm: HomeViewModel) {
 
                                     Text(
                                         text = customRingtoneName,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(
+                                                if (hasPickedCustomFile) {
+                                                    if (dark) {
+                                                        MaterialTheme.colorScheme.secondary.copy(alpha = 0.16f)
+                                                    } else {
+                                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                                                    }
+                                                } else {
+                                                    if (dark) {
+                                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f)
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.025f)
+                                                    }
+                                                }
+                                            )
+                                            .border(
+                                                width = if (hasPickedCustomFile) 1.dp else 0.8.dp,
+                                                color = if (hasPickedCustomFile) {
+                                                    if (dark) {
+                                                        MaterialTheme.colorScheme.secondary.copy(alpha = 0.55f)
+                                                    } else {
+                                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+                                                    }
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurface.copy(alpha = if (dark) 0.10f else 0.08f)
+                                                },
+                                                shape = RoundedCornerShape(14.dp)
+                                            )
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        color = if (hasPickedCustomFile) {
+                                            if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                        } else {
+                                            primaryText
+                                        },
+                                        fontWeight = if (hasPickedCustomFile) FontWeight.SemiBold else FontWeight.Medium,
                                         style = MaterialTheme.typography.bodyMedium,
-                                        color = secondaryText,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -1034,14 +1157,15 @@ fun ProfileScreen(vm: HomeViewModel) {
 
                                         androidx.compose.material3.OutlinedButton(
                                             onClick = {
-                                                customRingtoneUri = null
-                                                customRingtoneName = "Default ringtone"
+                                                stopPreviewRingtone()
+                                                customRingtoneUri = appDefaultRingtoneUri
+                                                customRingtoneName = appDefaultRingtoneName
                                                 alertPrefs.edit()
-                                                    .remove("custom_ringtone_uri")
-                                                    .putString("custom_ringtone_name", "Default ringtone")
+                                                    .putString("custom_ringtone_uri", appDefaultRingtoneUri)
+                                                    .putString("custom_ringtone_name", appDefaultRingtoneName)
                                                     .apply()
 
-                                                showToggleMessage("Default ringtone selected")
+                                                showToggleMessage("App default ringtone selected")
                                             },
                                             modifier = Modifier
                                                 .weight(1f)
@@ -1133,11 +1257,17 @@ fun ProfileScreen(vm: HomeViewModel) {
 
             if (showRingtonePickerPage) {
                 androidx.compose.material3.AlertDialog(
-                    onDismissRequest = { showRingtonePickerPage = false },
+                    onDismissRequest = {
+                        stopPreviewRingtone()
+                        showRingtonePickerPage = false
+                    },
                     confirmButton = {},
                     dismissButton = {
                         androidx.compose.material3.TextButton(
-                            onClick = { showRingtonePickerPage = false },
+                            onClick = {
+                                stopPreviewRingtone()
+                                showRingtonePickerPage = false
+                            },
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
@@ -1172,8 +1302,141 @@ fun ProfileScreen(vm: HomeViewModel) {
                             verticalArrangement = Arrangement.spacedBy(16.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .heightIn(max = 460.dp)
+                                .verticalScroll(rememberScrollState())
                                 .padding(top = 4.dp)
                         ) {
+                            Text(
+                                text = "App default ringtone",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = secondaryText,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .shadow(
+                                        elevation = if (dark) 0.dp else 8.dp,
+                                        shape = RoundedCornerShape(20.dp),
+                                        clip = false
+                                    ),
+                                shape = RoundedCornerShape(20.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (dark) {
+                                        if (customRingtoneUri == appDefaultRingtoneUri) MaterialTheme.colorScheme.secondary.copy(alpha = 0.16f)
+                                        else MaterialTheme.colorScheme.surface
+                                    } else {
+                                        if (customRingtoneUri == appDefaultRingtoneUri) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                        else premiumLightCard
+                                    }
+                                ),
+                                border = BorderStroke(
+                                    if (customRingtoneUri == appDefaultRingtoneUri) 1.5.dp else 1.dp,
+                                    if (customRingtoneUri == appDefaultRingtoneUri) {
+                                        if (dark) MaterialTheme.colorScheme.secondary.copy(alpha = 0.85f)
+                                        else MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                                    } else {
+                                        if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
+                                        else premiumLightBorder
+                                    }
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Text(
+                                        text = appDefaultRingtoneName,
+                                        color = primaryText,
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    if (customRingtoneUri == appDefaultRingtoneUri) {
+                                        Text(
+                                            text = "Selected",
+                                            color = if (dark) Color(0xFF57E389) else Color(0xFF1FAA59),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    if (previewingUri == appDefaultRingtoneUri) {
+                                        Text(
+                                            text = "Playing preview",
+                                            color = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Text(
+                                        text = "Built into the app",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = secondaryText,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    ) {
+                                        androidx.compose.material3.OutlinedButton(
+                                            onClick = {
+                                                playPreviewRingtone(appDefaultRingtoneUri)
+                                            },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(46.dp),
+                                            shape = RoundedCornerShape(18.dp)
+                                        ) {
+                                            val isPlaying = previewingUri == appDefaultRingtoneUri
+
+                                            Icon(
+                                                imageVector = if (isPlaying) Icons.Filled.GraphicEq else Icons.Filled.Check,
+                                                contentDescription = if (isPlaying) "Stop preview" else "Play preview",
+                                                tint = if (dark) Color.White else Color.Black
+                                            )
+
+                                            Spacer(Modifier.width(6.dp))
+
+                                            Text(
+                                                text = if (isPlaying) "Stop" else "Check",
+                                                color = if (dark) Color.White else Color.Black,
+                                                fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+                                            )
+                                        }
+
+                                        androidx.compose.material3.OutlinedButton(
+                                            onClick = {
+                                                stopPreviewRingtone()
+                                                customRingtoneUri = appDefaultRingtoneUri
+                                                customRingtoneName = appDefaultRingtoneName
+                                                alertPrefs.edit()
+                                                    .putString("custom_ringtone_uri", appDefaultRingtoneUri)
+                                                    .putString("custom_ringtone_name", appDefaultRingtoneName)
+                                                    .apply()
+
+                                                showToggleMessage("App default ringtone selected")
+                                                showRingtonePickerPage = false
+                                            },
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(46.dp),
+                                            shape = RoundedCornerShape(18.dp)
+                                        ) {
+                                            Text(
+                                                text = "Select",
+                                                color = if (dark) Color.White else Color.Black,
+                                                fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
                             Text(
                                 text = "Local file",
                                 style = MaterialTheme.typography.labelLarge,
@@ -1304,8 +1567,20 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 fontWeight = FontWeight.Bold
                                             )
                                         }
+                                        if (previewingUri == ringtoneUrl) {
+                                            Text(
+                                                text = "Playing preview",
+                                                color = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
                                         Text(
-                                            text = if (presetBusyName == ringtoneName) "Downloading preset..." else "Preset ringtone from server",
+                                            text = when {
+                                                presetBusyName == ringtoneName -> "Downloading preset..."
+                                                previewingUri == ringtoneUrl -> "Preview is playing now"
+                                                else -> "Preset ringtone from server"
+                                            },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = secondaryText,
                                             maxLines = 1,
@@ -1318,25 +1593,43 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         ) {
                                             androidx.compose.material3.OutlinedButton(
                                                 onClick = {
-                                                    scope.launch {
-                                                        presetBusyName = ringtoneName
-                                                        val localUri = downloadPresetRingtoneToCache(ringtoneUrl, ringtoneName)
-                                                        presetBusyName = ""
-                                                        if (localUri != null) {
-                                                            playPreviewRingtone(localUri)
-                                                        } else {
-                                                            showToggleMessage("Preset download failed: $ringtoneName")
+                                                    if (previewingUri == ringtoneUrl) {
+                                                        stopPreviewRingtone()
+                                                    } else {
+                                                        scope.launch {
+                                                            presetBusyName = ringtoneName
+                                                            val localUri = downloadPresetRingtoneToCache(ringtoneUrl, ringtoneName)
+                                                            presetBusyName = ""
+                                                            if (localUri != null) {
+                                                                playPreviewRingtone(ringtoneUrl)
+                                                            } else {
+                                                                showToggleMessage("Preset download failed: $ringtoneName")
+                                                            }
                                                         }
                                                     }
                                                 },
-                                                enabled = presetBusyName.isBlank() || presetBusyName == ringtoneName,
+                                                enabled = previewingUri == ringtoneUrl || presetBusyName.isBlank() || presetBusyName == ringtoneName,
                                                 modifier = Modifier
                                                     .weight(1f)
                                                     .height(46.dp),
                                                 shape = RoundedCornerShape(18.dp)
                                             ) {
+                                                val isPlaying = previewingUri == ringtoneUrl
+
+                                                Icon(
+                                                    imageVector = if (presetBusyName == ringtoneName) Icons.Filled.GraphicEq else if (isPlaying) Icons.Filled.GraphicEq else Icons.Filled.Check,
+                                                    contentDescription = if (isPlaying) "Stop preview" else "Play preview",
+                                                    tint = if (dark) Color.White else Color.Black
+                                                )
+
+                                                Spacer(Modifier.width(6.dp))
+
                                                 Text(
-                                                    text = if (presetBusyName == ringtoneName) "Downloading" else "Check",
+                                                    text = when {
+                                                        presetBusyName == ringtoneName -> "Downloading"
+                                                        isPlaying -> "Stop"
+                                                        else -> "Check"
+                                                    },
                                                     color = if (dark) Color.White else Color.Black,
                                                     fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
                                                 )

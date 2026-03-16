@@ -59,6 +59,7 @@ private const val KEY_ALARM_SOUND_5M = "alarm_sound_5m"
 private const val KEY_ALARM_VIBRATE_5M = "alarm_vibrate_5m"
 private const val KEY_CUSTOM_RINGTONE_URI = "custom_ringtone_uri"
 private const val KEY_CUSTOM_RINGTONE_NAME = "custom_ringtone_name"
+private const val KEY_CUSTOM_VIBRATION_PATTERN = "custom_vibration_pattern"
 private const val ALARM_ROUTE_GUARD_PREFS = "alarm_route_guard_prefs"
 private const val KEY_SELECTED_ROUTE_GUARD = "selected_route"
 private fun extractDisplayTime(text: String): String {
@@ -92,6 +93,33 @@ private fun isReceiverDisplayConsistentWithSource(sourceToken: String, displayTi
     val sourceMeridiem = extractMeridiemFromReceiverSourceToken(sourceToken) ?: return true
     val displayMeridiem = extractMeridiemFromDisplayTime(displayTime) ?: return true
     return sourceMeridiem == displayMeridiem
+}
+
+private fun resolveAlarmVibrationPattern(context: Context): LongArray {
+    val prefs = context.getSharedPreferences(NOTICE_ALERT_PREFS, Context.MODE_PRIVATE)
+    return when (prefs.getString(KEY_CUSTOM_VIBRATION_PATTERN, "Default vibration").orEmpty()) {
+        "Soft vibration" -> longArrayOf(0, 140, 90, 140)
+        "Strong vibration" -> longArrayOf(0, 320, 120, 420)
+        "Pulse vibration" -> longArrayOf(0, 120, 80, 120, 80, 260)
+        else -> longArrayOf(0, 220, 120, 220)
+    }
+}
+
+private fun buildLoopingAlarmVibrationPattern(basePattern: LongArray): LongArray {
+    if (basePattern.isEmpty()) return longArrayOf(0, 220, 120, 220)
+    if (basePattern.size == 1) return longArrayOf(basePattern[0], 220, 120, 220)
+
+    val repeatCount = 6
+    val result = LongArray(basePattern.size * repeatCount)
+    repeat(repeatCount) { blockIndex ->
+        basePattern.copyInto(
+            destination = result,
+            destinationOffset = blockIndex * basePattern.size,
+            startIndex = 0,
+            endIndex = basePattern.size
+        )
+    }
+    return result
 }
 
 object RunningAlertController {
@@ -292,14 +320,15 @@ object RunningAlertController {
                     context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
                 }
 
-                val pattern = longArrayOf(0, 500, 250, 900, 250, 500, 400, 1200)
+                val savedPattern = resolveAlarmVibrationPattern(context)
+                val loopingPattern = buildLoopingAlarmVibrationPattern(savedPattern)
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    val effect = VibrationEffect.createWaveform(pattern, 0) // loop
+                    val effect = VibrationEffect.createWaveform(loopingPattern, 0) // loop
                     val vibrationAttributes = VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM)
                     vibrator?.vibrate(effect, vibrationAttributes)
                 } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val effect = VibrationEffect.createWaveform(pattern, 0) // loop
+                    val effect = VibrationEffect.createWaveform(loopingPattern, 0) // loop
                     @Suppress("DEPRECATION")
                     vibrator?.vibrate(
                         effect,
@@ -310,7 +339,7 @@ object RunningAlertController {
                     )
                 } else {
                     @Suppress("DEPRECATION")
-                    vibrator?.vibrate(pattern, 0)
+                    vibrator?.vibrate(loopingPattern, 0)
                 }
 
                 vibrating = true
@@ -506,6 +535,14 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         // User toggles (Profile screen writes these)
         val prefs = context.getSharedPreferences(NOTICE_ALERT_PREFS, Context.MODE_PRIVATE)
+        val masterNotificationsEnabled = prefs.getBoolean("master_notifications_enabled", true)
+
+        // If master notifications are OFF, completely ignore this alarm
+        if (!masterNotificationsEnabled) {
+            Log.d("ScheduleAlarmReceiver", "Master notifications OFF — ignoring alarm completely")
+            return
+        }
+
         val soundOn = prefs.getBoolean(KEY_ALARM_SOUND_5M, true)
         val vibrateOn = prefs.getBoolean(KEY_ALARM_VIBRATE_5M, true)
 
