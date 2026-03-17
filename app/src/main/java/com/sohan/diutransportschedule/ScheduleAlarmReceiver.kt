@@ -17,7 +17,6 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.provider.Settings
 import android.Manifest
-import androidx.core.content.ContextCompat
 import java.util.Locale
 
 import android.app.PendingIntent
@@ -644,17 +643,15 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         }.ifBlank { rawText }
 
 
-        // Tap on the notification body: open the app directly.
-        // MainActivity will stop the current running alert when it sees the extra flags.
-        val tapIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("from_alarm_notification", true)
-            putExtra("stop_current_alarm", true)
+        // Tap on the notification body: route through the receiver first.
+        // This prevents OEMs from eagerly opening the activity when the device wakes
+        // and guarantees we stop the running alert before opening the app.
+        val tapIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
+            setAction(ACTION_TAP_OPEN_AND_STOP)
+            data = Uri.parse("diu://tap_open_and_stop")
         }
 
-        val contentPi = PendingIntent.getActivity(
+        val contentPi = PendingIntent.getBroadcast(
             context,
             ALARM_REQ_CODE + 21,
             tapIntent,
@@ -675,11 +672,6 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
                     (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
-        // Themed green Stop action icon (cleaner on MIUI / Samsung)
-        val actionColor = 0xFF2ECC71.toInt()
-        val baseDrawable = ContextCompat.getDrawable(context, android.R.drawable.ic_media_pause)?.mutate()
-        baseDrawable?.setTint(actionColor)
-
         val iconBitmap = BitmapFactory.decodeResource(context.resources, android.R.drawable.ic_media_pause)
         val icon = androidx.core.graphics.drawable.IconCompat.createWithBitmap(iconBitmap)
 
@@ -692,10 +684,8 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         // ✅ Left side: DIU logo (large icon)
         val largeLogo = BitmapFactory.decodeResource(context.resources, R.drawable.diu_logo)
 
-        // Fixed colors so system dark mode cannot change notification appearance
+        // Fixed color so system dark mode cannot change notification appearance
         val COLOR_DEEP_BLUE = 0xFF0B3D91.toInt()
-        val COLOR_GREEN = 0xFF2ECC71.toInt()
-        val COLOR_WHITE = 0xFFFFFFFF.toInt()
 
 
         val builder = NotificationCompat.Builder(context, channelId)
@@ -717,7 +707,6 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setSubText(if (timeToken.isNotBlank()) timeToken else null)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(true)                // ✅ time hide হবে না
-            .addAction(stopAction)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -726,18 +715,15 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setOnlyAlertOnce(false)
             .setDefaults(0)
 
+        if (soundOn || vibrateOn) {
+            builder.addAction(stopAction)
+        }
+
         builder.setContentIntent(contentPi)
-        builder.setFullScreenIntent(contentPi, false)
         // Do not use a full-screen intent here, otherwise some devices auto-open the app.
         // Heads-up popup will still depend on HIGH/MAX notification importance + priority.
         builder.setTicker(collapsedTitle)
-        builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-        builder.setPriority(NotificationCompat.PRIORITY_MAX)
-        builder.setCategory(NotificationCompat.CATEGORY_ALARM)
         builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-        }
         builder.setTimeoutAfter(5 * 60 * 1000L)
 
         // NOTE: Don't let the Notification itself play sound/vibration.
@@ -926,25 +912,7 @@ private fun scheduleNextFromStoredQueue(context: Context) {
     val exactAllowed = !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms())
 
     if (exactAllowed) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            val showIntent = context.packageManager
-                .getLaunchIntentForPackage(context.packageName)
-                ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP) }
-                ?: Intent(context, MainActivity::class.java)
-
-            val showPi = PendingIntent.getActivity(
-                context,
-                9002,
-                showIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-            )
-
-            alarmManager.setAlarmClock(
-                AlarmManager.AlarmClockInfo(next.atMs, showPi),
-                pi
-            )
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next.atMs, pi)
         } else {
             alarmManager.setExact(AlarmManager.RTC_WAKEUP, next.atMs, pi)
@@ -957,5 +925,8 @@ private fun scheduleNextFromStoredQueue(context: Context) {
         }
     }
 
-    Log.d("ScheduleAlarmReceiver", "Scheduled NEXT alarm from queue atMs=${next.atMs} title=${next.title} text=${next.text}")
+    Log.d(
+        "ScheduleAlarmReceiver",
+        "Scheduled NEXT alarm from queue with exactAllowed=$exactAllowed atMs=${next.atMs} title=${next.title} text=${next.text}"
+    )
 }
