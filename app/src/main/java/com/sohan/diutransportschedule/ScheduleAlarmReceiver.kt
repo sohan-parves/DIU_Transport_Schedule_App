@@ -39,10 +39,15 @@ import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_VI
 import android.util.Log
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
+import android.database.ContentObserver
+import android.media.AudioManager
 
 private const val ACTION_STOP_RUNNING_ALERT_INTERNAL = "com.sohan.diutransportschedule.ACTION_STOP_RUNNING_ALERT_INTERNAL"
 private const val ACTION_TAP_OPEN_AND_STOP = "com.sohan.diutransportschedule.ACTION_TAP_OPEN_AND_STOP"
+private const val ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT = "com.sohan.diutransportschedule.ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT"
+private const val ACTION_SCREEN_OFF_STOP_ALERT = "com.sohan.diutransportschedule.ACTION_SCREEN_OFF_STOP_ALERT"
 private const val ALERT_STOP_REQ_CODE = 9077
+private const val ALERT_AUTO_OPEN_REQ_CODE = 9078
 
 const val EXTRA_AT_MS = "com.sohan.diutransportschedule.EXTRA_AT_MS"
 const val EXTRA_EXPLICIT_MIDNIGHT = "com.sohan.diutransportschedule.EXTRA_EXPLICIT_MIDNIGHT"
@@ -120,6 +125,75 @@ private fun buildLoopingAlarmVibrationPattern(basePattern: LongArray): LongArray
     }
     return result
 }
+private fun openMainActivityFromAlarm(context: Context, fromTimeout: Boolean) {
+    val launch = Intent(context, MainActivity::class.java).apply {
+        addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+        )
+        putExtra("from_alarm_notification", true)
+        putExtra("from_alarm_timeout_auto_open", fromTimeout)
+    }
+
+    try {
+        context.startActivity(launch)
+    } catch (t: Throwable) {
+        Log.e("ScheduleAlarmReceiver", "Failed to open app from alarm action", t)
+        val fallbackLaunch = context.packageManager
+            .getLaunchIntentForPackage(context.packageName)
+            ?.apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
+                putExtra("from_alarm_notification", true)
+                putExtra("from_alarm_timeout_auto_open", fromTimeout)
+            }
+        if (fallbackLaunch != null) {
+            try {
+                context.startActivity(fallbackLaunch)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+}
+fun resetAlarmStateForNotifyTimeChange(context: Context) {
+    try {
+        RunningAlertController.stop(context.applicationContext)
+    } catch (_: Throwable) {
+    }
+
+    try {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val alarmIntent = Intent(context, ScheduleAlarmReceiver::class.java)
+        val alarmPi = PendingIntent.getBroadcast(
+            context,
+            MainActivity.ALARM_REQ_CODE,
+            alarmIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                        PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+        alarmManager.cancel(alarmPi)
+        alarmPi.cancel()
+    } catch (_: Throwable) {
+    }
+
+    try {
+        NotificationManagerCompat.from(context).cancel(MainActivity.ALARM_REQ_CODE)
+    } catch (_: Throwable) {
+    }
+
+    try {
+        context.getSharedPreferences(
+            MainActivity.PREF_SCHEDULE_QUEUE,
+            Context.MODE_PRIVATE
+        ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "").apply()
+    } catch (_: Throwable) {
+    }
+}
 
 object RunningAlertController {
     private var ringtone: Ringtone? = null
@@ -135,7 +209,128 @@ object RunningAlertController {
     private const val SAME_ALERT_KEY_WINDOW_MS = 30000L
     private val mainHandler = Handler(Looper.getMainLooper())
     private var localStopRunnable: Runnable? = null
+    private var screenOffReceiverRegistered = false
+    private var volumeObserverRegistered = false
+    private var volumeContentObserver: ContentObserver? = null
+    private var lastAlarmVolume = -1
+    private var lastRingVolume = -1
+    private var lastMusicVolume = -1
+    private var lastNotificationVolume = -1
+    private var lastSystemVolume = -1
 
+    private val screenOffStopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_OFF) {
+                try {
+                    RunningAlertController.stop(context.applicationContext)
+                } catch (_: Throwable) {}
+
+                try {
+                    NotificationManagerCompat.from(context.applicationContext).cancel(ALARM_REQ_CODE)
+                } catch (_: Throwable) {}
+
+                try {
+                    val nm = context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(ALARM_REQ_CODE)
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+    private fun captureCurrentVolumes(context: Context) {
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            lastAlarmVolume = am.getStreamVolume(AudioManager.STREAM_ALARM)
+            lastRingVolume = am.getStreamVolume(AudioManager.STREAM_RING)
+            lastMusicVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            lastNotificationVolume = am.getStreamVolume(AudioManager.STREAM_NOTIFICATION)
+            lastSystemVolume = am.getStreamVolume(AudioManager.STREAM_SYSTEM)
+        } catch (_: Throwable) {
+            lastAlarmVolume = -1
+            lastRingVolume = -1
+            lastMusicVolume = -1
+            lastNotificationVolume = -1
+            lastSystemVolume = -1
+        }
+    }
+
+    private fun hasAnyTrackedVolumeChanged(context: Context): Boolean {
+        return try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val alarm = am.getStreamVolume(AudioManager.STREAM_ALARM)
+            val ring = am.getStreamVolume(AudioManager.STREAM_RING)
+            val music = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val notification = am.getStreamVolume(AudioManager.STREAM_NOTIFICATION)
+            val system = am.getStreamVolume(AudioManager.STREAM_SYSTEM)
+            alarm != lastAlarmVolume ||
+                    ring != lastRingVolume ||
+                    music != lastMusicVolume ||
+                    notification != lastNotificationVolume ||
+                    system != lastSystemVolume
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun registerVolumeStopObserver(context: Context) {
+        try {
+            if (volumeObserverRegistered) return
+            captureCurrentVolumes(context.applicationContext)
+
+            val observer = object : ContentObserver(mainHandler) {
+                override fun onChange(selfChange: Boolean) {
+                    super.onChange(selfChange)
+
+                    if (!isAlertRunning) return
+
+                    try {
+                        // 🔥 Immediate stop without extra checks
+                        RunningAlertController.stop(context.applicationContext)
+
+                        try {
+                            NotificationManagerCompat.from(context.applicationContext)
+                                .cancel(ALARM_REQ_CODE)
+                        } catch (_: Throwable) {}
+
+                        try {
+                            val nm = context.applicationContext
+                                .getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                            nm.cancel(ALARM_REQ_CODE)
+                        } catch (_: Throwable) {}
+
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+
+            context.applicationContext.contentResolver.registerContentObserver(
+                Settings.System.CONTENT_URI,
+                true,
+                observer
+            )
+            volumeContentObserver = observer
+            volumeObserverRegistered = true
+        } catch (_: Throwable) {
+            volumeContentObserver = null
+            volumeObserverRegistered = false
+        }
+    }
+
+    private fun unregisterVolumeStopObserver(context: Context) {
+        try {
+            volumeContentObserver?.let {
+                context.applicationContext.contentResolver.unregisterContentObserver(it)
+            }
+        } catch (_: Throwable) {
+        }
+
+        volumeContentObserver = null
+        volumeObserverRegistered = false
+        lastAlarmVolume = -1
+        lastRingVolume = -1
+        lastMusicVolume = -1
+        lastNotificationVolume = -1
+        lastSystemVolume = -1
+    }
     fun isRunning(): Boolean = isAlertRunning
 
     fun stop(context: Context) {
@@ -144,6 +339,18 @@ object RunningAlertController {
         } catch (_: Throwable) {
         }
         localStopRunnable = null
+
+        // 🔥 Instant cleanup for volume/power button stop
+        unregisterVolumeStopObserver(context.applicationContext)
+
+        try {
+            if (screenOffReceiverRegistered) {
+                context.applicationContext.unregisterReceiver(screenOffStopReceiver)
+                screenOffReceiverRegistered = false
+            }
+        } catch (_: Throwable) {
+            screenOffReceiverRegistered = false
+        }
 
         try {
             ringtone?.stop()
@@ -174,23 +381,40 @@ object RunningAlertController {
             lastAlertKeyWallMs = 0L
         }, SAME_ALERT_KEY_WINDOW_MS)
 
-        // Cancel auto-stop alarm if any
+        // Cancel auto-stop / auto-open alarms if any
         try {
             val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val i = Intent(context, ScheduleAlarmReceiver::class.java).apply {
+
+            val stopIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
                 action = ACTION_STOP_RUNNING_ALERT_INTERNAL
                 data = Uri.parse("diu://stop_running_alert")
             }
-            val pi = PendingIntent.getBroadcast(
+            val stopPi = PendingIntent.getBroadcast(
                 context,
                 ALERT_STOP_REQ_CODE,
-                i,
+                stopIntent,
                 PendingIntent.FLAG_NO_CREATE or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
             )
-            if (pi != null) {
-                am.cancel(pi)
-                pi.cancel()
+            if (stopPi != null) {
+                am.cancel(stopPi)
+                stopPi.cancel()
+            }
+
+            val autoOpenIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
+                action = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
+                data = Uri.parse("diu://auto_open_after_timeout")
+            }
+            val autoOpenPi = PendingIntent.getBroadcast(
+                context,
+                ALERT_AUTO_OPEN_REQ_CODE,
+                autoOpenIntent,
+                PendingIntent.FLAG_NO_CREATE or
+                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            )
+            if (autoOpenPi != null) {
+                am.cancel(autoOpenPi)
+                autoOpenPi.cancel()
             }
         } catch (_: Throwable) {
         }
@@ -240,7 +464,16 @@ object RunningAlertController {
         }
         val newSessionId = System.currentTimeMillis()
         currentSessionId = newSessionId
-
+        try {
+            if (!screenOffReceiverRegistered) {
+                val filter = android.content.IntentFilter(Intent.ACTION_SCREEN_OFF)
+                context.applicationContext.registerReceiver(screenOffStopReceiver, filter)
+                screenOffReceiverRegistered = true
+            }
+        } catch (_: Throwable) {
+        }
+        // 🔥 Enable instant stop via volume buttons (even on lock screen)
+        registerVolumeStopObserver(context.applicationContext)
         if (soundOn) {
             try {
                 val prefs = context.getSharedPreferences(NOTICE_ALERT_PREFS, Context.MODE_PRIVATE)
@@ -293,8 +526,8 @@ object RunningAlertController {
 
         isAlertRunning = soundOn || vibrateOn
 
-        // Local in-process fallback auto-stop.
-        // This protects against rare cases where the AlarmManager auto-stop broadcast is delayed,
+        // Local in-process fallback timeout handling.
+        // This protects against rare cases where the AlarmManager timeout broadcast is delayed,
         // blocked by OEM background restrictions, or the notification is tapped while audio is still active.
         localStopRunnable = Runnable {
             if (currentSessionId == newSessionId) {
@@ -354,30 +587,31 @@ object RunningAlertController {
             vibrating = false
         }
 
-        // Auto-stop after duration
+        // Auto-timeout after duration: stop alert and try to open app.
         try {
             val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val stopAt = System.currentTimeMillis() + durationMs
-            val i = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-                action = ACTION_STOP_RUNNING_ALERT_INTERNAL
-                data = Uri.parse("diu://stop_running_alert")
+            val timeoutAt = System.currentTimeMillis() + durationMs
+
+            val timeoutIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
+                action = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
+                data = Uri.parse("diu://auto_open_after_timeout")
             }
-            val pi = PendingIntent.getBroadcast(
+            val timeoutPi = PendingIntent.getBroadcast(
                 context,
-                ALERT_STOP_REQ_CODE,
-                i,
+                ALERT_AUTO_OPEN_REQ_CODE,
+                timeoutIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
             )
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, stopAt, pi)
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, timeoutAt, timeoutPi)
             } else {
                 @Suppress("DEPRECATION")
-                am.setExact(AlarmManager.RTC_WAKEUP, stopAt, pi)
+                am.setExact(AlarmManager.RTC_WAKEUP, timeoutAt, timeoutPi)
             }
         } catch (t: Throwable) {
-            Log.e("ScheduleAlarmReceiver", "Failed to schedule auto-stop", t)
+            Log.e("ScheduleAlarmReceiver", "Failed to schedule timeout auto-open", t)
         }
     }
 }
@@ -397,7 +631,9 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         if (
             action != ACTION_STOP_SCHEDULE_ALARM &&
             action != ACTION_STOP_RUNNING_ALERT_INTERNAL &&
-            action != ACTION_TAP_OPEN_AND_STOP
+            action != ACTION_TAP_OPEN_AND_STOP &&
+            action != ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT &&
+            action != ACTION_SCREEN_OFF_STOP_ALERT
         ) {
             // --- Hard duplicate guard: some devices fire the same broadcast twice within milliseconds ---
             val nowElapsed = SystemClock.elapsedRealtime()
@@ -418,57 +654,88 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         // Stop button action: stop ONLY the currently running sound/vibration + hide current notification.
         // Do NOT open the app and do NOT cancel future alarms.
         if (action == ACTION_STOP_SCHEDULE_ALARM) {
-            RunningAlertController.stop(context)
-            NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+            RunningAlertController.stop(context.applicationContext)
+            try {
+                NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
+            try {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    NotificationManagerCompat.from(context.applicationContext).cancel(ALARM_REQ_CODE)
+                } catch (_: Throwable) {
+                }
+                try {
+                    val nm = context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(ALARM_REQ_CODE)
+                } catch (_: Throwable) {
+                }
+            }, 250L)
+            return
+        }
+        if (action == ACTION_SCREEN_OFF_STOP_ALERT) {
+            RunningAlertController.stop(context.applicationContext)
             return
         }
 
-        // Notification body tap: stop the current alert, hide the notification, then open the app.
         if (action == ACTION_TAP_OPEN_AND_STOP) {
             RunningAlertController.stop(context.applicationContext)
-            NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
-
-            val launch = Intent(context, MainActivity::class.java).apply {
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP
-                )
-                putExtra("from_alarm_notification", true)
-            }
-
             try {
-                context.startActivity(launch)
-            } catch (t: Throwable) {
-                Log.e("ScheduleAlarmReceiver", "Failed to open app from notification tap", t)
-                val fallbackLaunch = context.packageManager
-                    .getLaunchIntentForPackage(context.packageName)
-                    ?.apply {
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK or
-                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                                Intent.FLAG_ACTIVITY_SINGLE_TOP
-                        )
-                        putExtra("from_alarm_notification", true)
-                    }
-                if (fallbackLaunch != null) {
-                    try {
-                        context.startActivity(fallbackLaunch)
-                    } catch (_: Throwable) {
-                    }
-                }
+                NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
             }
+            try {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
+            openMainActivityFromAlarm(context, fromTimeout = false)
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    NotificationManagerCompat.from(context.applicationContext).cancel(ALARM_REQ_CODE)
+                } catch (_: Throwable) {
+                }
+                try {
+                    val nm = context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(ALARM_REQ_CODE)
+                } catch (_: Throwable) {
+                }
+            }, 250L)
             return
         }
 
         // Internal auto-stop after 5 minutes
         if (action == ACTION_STOP_RUNNING_ALERT_INTERNAL) {
             RunningAlertController.stop(context.applicationContext)
-            NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+            try {
+                NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
+            try {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
             return
         }
         Log.d("ScheduleAlarmReceiver", "onReceive action=${intent.action} title=${intent.getStringExtra(EXTRA_TITLE)} text=${intent.getStringExtra(EXTRA_TEXT)}")
-
+        if (action == ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT) {
+            RunningAlertController.stop(context.applicationContext)
+            try {
+                NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
+            try {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancel(ALARM_REQ_CODE)
+            } catch (_: Throwable) {
+            }
+            return
+        }
         // --- De-dupe: some devices/OS versions may deliver the same alarm twice ---
         // We tag each scheduled alarm with its atMs and ignore repeats within a short window.
         val firedAtMs = intent.getLongExtra(EXTRA_AT_MS, -1L)
@@ -643,20 +910,22 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         }.ifBlank { rawText }
 
 
-        // Tap on the notification body: route through the receiver first.
-        // This prevents OEMs from eagerly opening the activity when the device wakes
-        // and guarantees we stop the running alert before opening the app.
-        val tapIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-            setAction(ACTION_TAP_OPEN_AND_STOP)
-            data = Uri.parse("diu://tap_open_and_stop")
-        }
+        // Tap on the notification body: stop current alert first, then open the app.
+        val tapIntent = context.packageManager
+            .getLaunchIntentForPackage(context.packageName)
+            ?.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra("stop_current_alarm", true)
+                data = Uri.parse("diu://tap_open_and_stop/${System.currentTimeMillis()}")
+            }
 
-        val contentPi = PendingIntent.getBroadcast(
+        val contentPi = PendingIntent.getActivity(
             context,
-            ALARM_REQ_CODE + 21,
+            (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
             tapIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                        PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
         // Stop action
@@ -710,8 +979,9 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setAutoCancel(false)
-            .setOngoing(true)
+            .setAutoCancel(true)
+            .setLocalOnly(true)
+            .setOngoing(false)
             .setOnlyAlertOnce(false)
             .setDefaults(0)
 
@@ -720,6 +990,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         }
 
         builder.setContentIntent(contentPi)
+        builder.setDeleteIntent(stopPi)
         // Do not use a full-screen intent here, otherwise some devices auto-open the app.
         // Heads-up popup will still depend on HIGH/MAX notification importance + priority.
         builder.setTicker(collapsedTitle)

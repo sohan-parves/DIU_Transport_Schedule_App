@@ -83,7 +83,7 @@ import android.app.Notification
 import androidx.core.view.WindowCompat
 import android.graphics.Color
 import androidx.core.view.WindowInsetsControllerCompat
-
+import android.view.KeyEvent
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -95,6 +95,7 @@ import com.sohan.diutransportschedule.BuildConfig
 import com.sohan.diutransportschedule.sync.ApkDownloader
 import com.sohan.diutransportschedule.sync.ResolvedUpdate
 import com.sohan.diutransportschedule.sync.UpdateChecker
+
 // ==============================
 // 🔧 FIRESTORE TARGET (DEV vs PROD)
 // ==============================
@@ -450,7 +451,23 @@ class MainActivity : ComponentActivity() {
             openNoticeState.value = true
         }
     }
-
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                android.view.KeyEvent.KEYCODE_VOLUME_UP,
+                android.view.KeyEvent.KEYCODE_VOLUME_DOWN,
+                android.view.KeyEvent.KEYCODE_VOLUME_MUTE -> {
+                    try {
+                        RunningAlertController.stop(applicationContext)
+                        NotificationManagerCompat.from(applicationContext).cancel(ALARM_REQ_CODE)
+                    } catch (_: Throwable) {
+                    }
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
     private fun postScheduleNotificationNow(context: Context, title: String, body: String) {
         val prefs = context.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
         val soundOn = prefs.getBoolean("alarm_sound_5m", true)
