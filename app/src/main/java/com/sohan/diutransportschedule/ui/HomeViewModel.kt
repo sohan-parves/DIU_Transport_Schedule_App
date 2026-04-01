@@ -231,7 +231,7 @@ class HomeViewModel(
         }
     }
 
-    fun refresh(showBannerIfUpdated: Boolean = true) {
+    fun refresh(showBannerIfUpdated: Boolean = true, allowDataRead: Boolean = true) {
         viewModelScope.launch {
             if (_isSyncing.value) return@launch
             val now = System.currentTimeMillis()
@@ -244,7 +244,7 @@ class HomeViewModel(
             }
             _isSyncing.value = true
             try {
-                val res = repo.syncIfNeeded()
+                val res = repo.syncIfNeeded(allowDataRead = allowDataRead)
                 if (res.message.isNotBlank()) _updateMessage.value = res.message
 
                 if (showBannerIfUpdated && showUpdateBanner.value &&

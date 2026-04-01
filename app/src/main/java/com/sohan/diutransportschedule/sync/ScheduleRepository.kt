@@ -49,9 +49,13 @@ class ScheduleRepository(
 
     // ---------------- Sync ----------------
 
-    suspend fun syncIfNeeded(): SyncResult {
+    suspend fun syncIfNeeded(allowDataRead: Boolean = true): SyncResult {
         val meta = fs.collection("meta").document("app").get().await()
-        val remoteVersion = (meta.getLong("version") ?: 0L).toInt()
+        val remoteVersion = (
+                meta.getLong("scheduleVersion")
+                    ?: meta.getLong("version")
+                    ?: 0L
+                ).toInt()
         val message = meta.getString("message") ?: ""
 
         val localVersion = store.getLocalVersion()
@@ -61,6 +65,9 @@ class ScheduleRepository(
         // If version hasn't changed and we already have a local version, do NOT re-read the schedule doc.
         // This keeps returning-user opens at ~1 read (meta/app only).
         if (!updated && localVersion > 0) {
+            return SyncResult(updated = false, version = remoteVersion, message = message)
+        }
+        if (!allowDataRead) {
             return SyncResult(updated = false, version = remoteVersion, message = message)
         }
 

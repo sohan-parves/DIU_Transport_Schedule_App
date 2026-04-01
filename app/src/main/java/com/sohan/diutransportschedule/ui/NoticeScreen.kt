@@ -20,13 +20,15 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.shape.CircleShape
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Color
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import java.time.Instant
@@ -108,6 +110,42 @@ private const val PREF_NOTICES = "notice_prefs"
 private const val KEY_READ_IDS = "read_ids" // StringSet
 
 private const val KEY_NOTICES_VERSION = "notices_version" // Long
+private const val PREF_FIRESTORE_WINDOW = "firestore_window_limit"
+private const val KEY_FIRESTORE_WINDOW_DATE = "window_date"
+private const val KEY_FIRESTORE_WINDOW_SLOT = "window_slot"
+
+private fun currentFirestoreWindowSlot(): Int {
+    val hour = java.time.LocalTime.now().hour
+    return when {
+        hour in 5..11 -> 1   // Morning
+        hour in 12..16 -> 2  // Noon
+        hour in 17..23 -> 3  // Evening
+        else -> 0
+    }
+}
+
+private fun canUseFirestoreWindow(context: Context): Boolean {
+    val slot = currentFirestoreWindowSlot()
+    if (slot == 0) return false
+
+    val prefs = context.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
+    val today = java.time.LocalDate.now().toString()
+    val savedDate = prefs.getString(KEY_FIRESTORE_WINDOW_DATE, "") ?: ""
+    val savedSlot = prefs.getInt(KEY_FIRESTORE_WINDOW_SLOT, -1)
+
+    return !(savedDate == today && savedSlot == slot)
+}
+
+private fun markFirestoreWindowUsed(context: Context) {
+    val slot = currentFirestoreWindowSlot()
+    if (slot == 0) return
+
+    context.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_FIRESTORE_WINDOW_DATE, java.time.LocalDate.now().toString())
+        .putInt(KEY_FIRESTORE_WINDOW_SLOT, slot)
+        .apply()
+}
 
 private fun readIds(ctx: Context): MutableSet<String> {
     val p = ctx.getSharedPreferences(PREF_NOTICES, Context.MODE_PRIVATE)
@@ -145,7 +183,7 @@ fun NoticeScreen(pad: PaddingValues) {
     // Keep local read-state
     var readSet by remember { mutableStateOf(readIds(ctx)) }
 
-    val dark = isSystemInDarkTheme()
+    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
 
     val unreadCardColors = CardDefaults.cardColors(
         containerColor = if (dark)
@@ -201,30 +239,9 @@ fun NoticeScreen(pad: PaddingValues) {
     // Reduce reads: listen only to a tiny meta doc for version changes.
     // When version changes, fetch notices once.
     fun fetchNoticesOnce() {
-        db.collection("notices")
-            .orderBy("createdAtMs", com.google.firebase.firestore.Query.Direction.DESCENDING)
-            .limit(50)
-            .get()
-            .addOnSuccessListener { snap ->
-                val list = snap.documents.map { d ->
-                    AdminNoticeUi(
-                        id = d.id,
-                        title = d.getString("title").orEmpty().ifBlank { "Notice" },
-                        body = d.getString("body").orEmpty()
-                            .ifBlank { d.getString("extractedText").orEmpty() },
-                        createdAtMs = (d.getLong("createdAtMs") ?: 0L),
-                        releaseAtMs = (d.getLong("releaseAtMs") ?: (d.getLong("createdAtMs") ?: 0L)),
-                        isRead = false
-                    )
-                }
-
-                error = null
-                notices = applyReadState(list)
-                saveCachedNotices(ctx, list)
-            }
-            .addOnFailureListener { e ->
-                error = e.message
-            }
+        // Strict 3-read/day mode: no second Firestore query here.
+        error = null
+        notices = applyReadState(readCachedNotices(ctx))
     }
 
     DisposableEffect(Unit) {
@@ -235,34 +252,35 @@ fun NoticeScreen(pad: PaddingValues) {
 
         // 2) Version listener: only the tiny meta doc is listened to.
         var lastSeenVersion = readCachedNoticesVersion(ctx)
-        var reg: ListenerRegistration? = null
 
-        reg = db.collection("meta")
-            .document("notices")
-            .addSnapshotListener { snap, e ->
-                if (e != null) {
+        if (canUseFirestoreWindow(ctx)) {
+            markFirestoreWindowUsed(ctx)
+
+            db.collection("meta")
+                .document("notices")
+                .get()
+                .addOnSuccessListener { snap ->
+                    val remoteVersion = snap.getLong("version") ?: 0L
+
+                    when {
+                        remoteVersion > lastSeenVersion -> {
+                            lastSeenVersion = remoteVersion
+                            saveCachedNoticesVersion(ctx, remoteVersion)
+                            saveNoticesVersion(ctx, remoteVersion)
+                            fetchNoticesOnce()
+                        }
+
+                        notices.isEmpty() && lastSeenVersion == 0L && remoteVersion == 0L -> {
+                            fetchNoticesOnce()
+                        }
+                    }
+                }
+                .addOnFailureListener { e ->
                     if (notices.isEmpty()) error = e.message
-                    return@addSnapshotListener
                 }
+        }
 
-                val remoteVersion = snap?.getLong("version") ?: 0L
-
-                when {
-                    remoteVersion > lastSeenVersion -> {
-                        lastSeenVersion = remoteVersion
-                        saveCachedNoticesVersion(ctx, remoteVersion)
-                        saveNoticesVersion(ctx, remoteVersion)
-                        fetchNoticesOnce()
-                    }
-
-                    notices.isEmpty() && lastSeenVersion == 0L && remoteVersion == 0L -> {
-                        // Bootstrap only when there is no cached data and no remote version yet.
-                        fetchNoticesOnce()
-                    }
-                }
-            }
-
-        onDispose { reg?.remove() }
+        onDispose { }
     }
 
     Box(
@@ -271,13 +289,93 @@ fun NoticeScreen(pad: PaddingValues) {
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        MaterialTheme.colorScheme.background,
-                        MaterialTheme.colorScheme.background
+                        if (dark) Color(0xFF07111F) else Color(0xFFF8FBFF),
+                        if (dark) Color(0xFF040B16) else Color(0xFFFDFEFF)
                     )
                 )
             )
             .padding(pad)
     ) {
+        Canvas(
+            modifier = Modifier.matchParentSize()
+        ) {
+            val bubblePrimary = if (dark) Color(0xFF60A5FA).copy(alpha = 0.07f) else Color(0xFF60A5FA).copy(alpha = 0.10f)
+            val bubbleSoft = if (dark) Color.White.copy(alpha = 0.020f) else Color.White.copy(alpha = 0.78f)
+            val bubbleAccent = if (dark) Color(0xFF93C5FD).copy(alpha = 0.040f) else Color(0xFFBFDBFE).copy(alpha = 0.36f)
+            val bubbleDeep = if (dark) Color(0xFF1D4ED8).copy(alpha = 0.055f) else Color(0xFFDBEAFE).copy(alpha = 0.30f)
+
+            drawCircle(
+                color = bubblePrimary,
+                radius = size.minDimension * 0.28f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.08f, size.height * 0.06f)
+            )
+            drawCircle(
+                color = bubbleDeep,
+                radius = size.minDimension * 0.24f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.88f, size.height * 0.10f)
+            )
+            drawCircle(
+                color = bubbleSoft,
+                radius = size.minDimension * 0.12f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.16f, size.height * 0.34f)
+            )
+            drawCircle(
+                color = bubbleAccent,
+                radius = size.minDimension * 0.15f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.90f, size.height * 0.28f)
+            )
+            drawCircle(
+                color = bubblePrimary,
+                radius = size.minDimension * 0.11f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.78f, size.height * 0.56f)
+            )
+            drawCircle(
+                color = bubbleSoft,
+                radius = size.minDimension * 0.14f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.20f, size.height * 0.66f)
+            )
+            drawCircle(
+                color = bubbleDeep,
+                radius = size.minDimension * 0.18f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.92f, size.height * 0.78f)
+            )
+            drawCircle(
+                color = bubbleAccent,
+                radius = size.minDimension * 0.09f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.08f, size.height * 0.86f)
+            )
+            drawCircle(
+                color = bubbleSoft,
+                radius = size.minDimension * 0.07f,
+                center = androidx.compose.ui.geometry.Offset(size.width * 0.62f, size.height * 0.80f)
+            )
+
+            val lineColor = if (dark) Color.White.copy(alpha = 0.028f) else Color(0xFFBFDBFE).copy(alpha = 0.20f)
+            val step = size.height / 42f
+            for (i in 0..18) {
+                val y = size.height * 0.46f + i * step * 0.55f
+                drawLine(
+                    color = lineColor,
+                    start = androidx.compose.ui.geometry.Offset(size.width * 0.08f, y),
+                    end = androidx.compose.ui.geometry.Offset(size.width * 0.92f, y),
+                    strokeWidth = 1.2f
+                )
+            }
+
+            val dotColor = if (dark) Color(0xFF60A5FA).copy(alpha = 0.055f) else Color(0xFF93C5FD).copy(alpha = 0.24f)
+            val dotGap = size.width / 28f
+            for (row in 0..5) {
+                for (col in 0..14) {
+                    val x = size.width * 0.06f + col * dotGap
+                    val y = size.height * 0.62f + row * dotGap * 0.72f
+                    drawCircle(
+                        color = dotColor,
+                        radius = 1.8f,
+                        center = androidx.compose.ui.geometry.Offset(x, y)
+                    )
+                }
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -449,77 +547,228 @@ fun NoticeScreen(pad: PaddingValues) {
                                     usePlatformDefaultWidth = false
                                 )
                             ) {
-                                // Full screen surface
                                 Surface(
                                     modifier = Modifier.fillMaxSize(),
-                                    color = MaterialTheme.colorScheme.background
+                                    color = if (dark) Color(0xFF0B0F17) else Color(0xFFF8FBFF)
                                 ) {
-                                    Column(modifier = Modifier.fillMaxSize()) {
-                                        // Top bar
-                                        Row(
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        Canvas(
+                                            modifier = Modifier.matchParentSize()
+                                        ) {
+                                            val bubbleColorPrimary = if (dark) Color(0xFF60A5FA).copy(alpha = 0.09f) else Color(0xFF60A5FA).copy(alpha = 0.11f)
+                                            val bubbleColorSecondary = if (dark) Color.White.copy(alpha = 0.035f) else Color.White.copy(alpha = 0.80f)
+                                            val bubbleColorAccent = if (dark) Color(0xFF93C5FD).copy(alpha = 0.05f) else Color(0xFFBFDBFE).copy(alpha = 0.36f)
+
+                                            drawCircle(
+                                                color = bubbleColorPrimary,
+                                                radius = size.minDimension * 0.34f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.88f, size.height * 0.10f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorSecondary,
+                                                radius = size.minDimension * 0.22f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.14f, size.height * 0.05f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorAccent,
+                                                radius = size.minDimension * 0.18f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.90f, size.height * 0.34f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorPrimary,
+                                                radius = size.minDimension * 0.12f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.10f, size.height * 0.34f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorSecondary,
+                                                radius = size.minDimension * 0.16f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.84f, size.height * 0.62f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorAccent,
+                                                radius = size.minDimension * 0.10f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.18f, size.height * 0.76f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorPrimary,
+                                                radius = size.minDimension * 0.20f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.92f, size.height * 0.88f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorSecondary,
+                                                radius = size.minDimension * 0.08f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.72f, size.height * 0.78f)
+                                            )
+                                            drawCircle(
+                                                color = bubbleColorAccent,
+                                                radius = size.minDimension * 0.14f,
+                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.08f, size.height * 0.92f)
+                                            )
+                                        }
+
+                                        Column(modifier = Modifier.fillMaxSize()) {
+                                        Box(
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                                                .padding(horizontal = 18.dp, vertical = 18.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = n.title.ifBlank { "Notice" },
-                                                    style = MaterialTheme.typography.headlineSmall,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = MaterialTheme.colorScheme.onSurface,
-                                                    maxLines = 2,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                val dateText = formatDate(n.releaseAtMs)
-                                                if (dateText.isNotBlank()) {
-                                                    Text(
-                                                        text = dateText,
-                                                        style = MaterialTheme.typography.labelMedium,
-                                                        color = MaterialTheme.colorScheme.onSurface.copy(
-                                                            alpha = if (dark) 0.72f else 0.78f
-                                                        ),
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
+                                                .background(
+                                                    Brush.verticalGradient(
+                                                        colors = listOf(
+                                                            if (dark) Color(0xFF182033) else Color(0xFFF9FBFF),
+                                                            if (dark) Color(0xFF0F1523) else Color(0xFFFFFFFF)
+                                                        )
                                                     )
-                                                }
-                                            }
-                                            TextButton(
-                                                onClick = { open = false },
-                                                colors = ButtonDefaults.textButtonColors(
-                                                    contentColor = MaterialTheme.colorScheme.onSurface
                                                 )
+                                        ) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 18.dp, vertical = 18.dp),
+                                                verticalArrangement = Arrangement.spacedBy(12.dp)
                                             ) {
-                                                Text(
-                                                    text = "Close",
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.Top
+                                                ) {
+                                                    Column(
+                                                        modifier = Modifier.weight(1f),
+                                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                                    ) {
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                        ) {
+                                                            Surface(
+                                                                modifier = Modifier.size(42.dp),
+                                                                shape = CircleShape,
+                                                                color = if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.92f),
+                                                                tonalElevation = if (dark) 0.dp else 1.dp,
+                                                                shadowElevation = if (dark) 0.dp else 6.dp
+                                                            ) {
+                                                                Box(contentAlignment = Alignment.Center) {
+                                                                    Icon(
+                                                                        imageVector = Icons.Filled.Notifications,
+                                                                        contentDescription = null,
+                                                                        tint = if (dark) Color(0xFF93C5FD) else Color(0xFF1D4ED8),
+                                                                        modifier = Modifier.size(20.dp)
+                                                                    )
+                                                                }
+                                                            }
+
+                                                            Surface(
+                                                                shape = RoundedCornerShape(999.dp),
+                                                                color = if (dark) Color.White.copy(alpha = 0.08f) else Color(0xFFEEF2FF)
+                                                            ) {
+                                                                Text(
+                                                                    text = if (!n.isRead) "New notice" else "Notice",
+                                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                                                    style = MaterialTheme.typography.labelMedium,
+                                                                    fontWeight = FontWeight.SemiBold,
+                                                                    color = if (dark) Color.White else Color(0xFF334155)
+                                                                )
+                                                            }
+                                                        }
+
+                                                        Text(
+                                                            text = n.title.ifBlank { "Notice" },
+                                                            style = MaterialTheme.typography.headlineSmall,
+                                                            fontWeight = FontWeight.ExtraBold,
+                                                            color = MaterialTheme.colorScheme.onSurface,
+                                                            maxLines = 3,
+                                                            overflow = TextOverflow.Ellipsis
+                                                        )
+
+                                                        val dateText = formatDate(n.releaseAtMs)
+                                                        if (dateText.isNotBlank()) {
+                                                            Text(
+                                                                text = dateText,
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                color = MaterialTheme.colorScheme.onSurface.copy(
+                                                                    alpha = if (dark) 0.68f else 0.74f
+                                                                ),
+                                                                fontWeight = FontWeight.Medium,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis
+                                                            )
+                                                        }
+                                                    }
+
+                                                    Surface(
+                                                        shape = RoundedCornerShape(999.dp),
+                                                        color = if (dark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.92f),
+                                                        tonalElevation = if (dark) 0.dp else 1.dp,
+                                                        shadowElevation = if (dark) 0.dp else 6.dp,
+                                                        modifier = Modifier.clickable { open = false }
+                                                    ) {
+                                                        Row(
+                                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = "Close",
+                                                                fontWeight = FontWeight.SemiBold,
+                                                                color = MaterialTheme.colorScheme.onSurface
+                                                            )
+                                                        }
+                                                    }
+                                                }
+
                                             }
                                         }
 
                                         HorizontalDivider(
                                             color = MaterialTheme.colorScheme.outline.copy(
-                                                alpha = if (dark) 0.16f else 0.12f
+                                                alpha = if (dark) 0.12f else 0.10f
                                             )
                                         )
 
-                                        // Body
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxSize()
-                                                .padding(horizontal = 16.dp, vertical = 14.dp)
+                                                .padding(horizontal = 16.dp, vertical = 16.dp)
                                                 .verticalScroll(rememberScrollState())
                                         ) {
-                                            Text(
-                                                text = n.body,
-                                                style = MaterialTheme.typography.bodyLarge,
-                                                lineHeight = 26.sp,
-                                                letterSpacing = 0.3.sp,
-                                                color = MaterialTheme.colorScheme.onBackground
-                                            )
+                                            Card(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                shape = RoundedCornerShape(28.dp),
+                                                colors = CardDefaults.cardColors(
+                                                    containerColor = if (dark) {
+                                                        Color(0xFF111827).copy(alpha = 0.96f)
+                                                    } else {
+                                                        Color(0xFFFEFEFF)
+                                                    }
+                                                ),
+                                                border = BorderStroke(
+                                                    0.8.dp,
+                                                    MaterialTheme.colorScheme.outline.copy(alpha = if (dark) 0.14f else 0.08f)
+                                                ),
+                                                elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 8.dp)
+                                            ) {
+                                                Column(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 20.dp, vertical = 20.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "Announcement details",
+                                                        style = MaterialTheme.typography.labelLarge,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (dark) 0.88f else 0.72f)
+                                                    )
+                                                    Text(
+                                                        text = n.body,
+                                                        style = MaterialTheme.typography.bodyLarge,
+                                                        lineHeight = 30.sp,
+                                                        letterSpacing = 0.15.sp,
+                                                        color = MaterialTheme.colorScheme.onBackground,
+                                                        fontWeight = FontWeight.Normal
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
+                                }
                                 }
                             }
                         }

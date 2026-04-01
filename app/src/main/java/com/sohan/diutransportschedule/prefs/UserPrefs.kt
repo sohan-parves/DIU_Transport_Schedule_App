@@ -92,6 +92,7 @@ class UserPrefs(private val context: Context) {
             if (!pref.contains(KEY_COMPACT_MODE)) pref[KEY_COMPACT_MODE] = true
             if (!pref.contains(KEY_NOTIFICATIONS_ENABLED)) pref[KEY_NOTIFICATIONS_ENABLED] = true
             if (!pref.contains(KEY_NOTIFY_LEAD_MINUTES)) pref[KEY_NOTIFY_LEAD_MINUTES] = 30
+            if (!pref.contains(KEY_SELECTED_ROUTE)) pref[KEY_SELECTED_ROUTE] = "ALL"
         }
     }
 }

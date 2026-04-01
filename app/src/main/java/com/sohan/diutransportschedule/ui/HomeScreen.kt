@@ -109,6 +109,57 @@ import android.Manifest
 import android.app.PendingIntent
 // --- Notice notification channels ---
 private const val NOTICE_CHANNEL_ID = "admin_notices_v2"
+private const val PREF_FIRESTORE_WINDOW = "firestore_window_limit"
+private const val KEY_FIRESTORE_WINDOW_DATE = "window_date"
+private const val KEY_FIRESTORE_WINDOW_SLOT = "window_slot"
+private const val PREF_FIRST_INSTALL_SYNC = "first_install_sync"
+private const val KEY_FIRST_INSTALL_SYNC_DONE = "first_install_sync_done"
+
+private fun currentFirestoreWindowSlot(): Int {
+    val hour = LocalTime.now().hour
+    return when {
+        hour in 5..11 -> 1   // Morning
+        hour in 12..16 -> 2  // Noon
+        hour in 17..23 -> 3  // Evening
+        else -> 0            // Night: no read
+    }
+}
+
+private fun canUseFirestoreWindow(context: Context): Boolean {
+    val slot = currentFirestoreWindowSlot()
+    if (slot == 0) return false
+
+    val prefs = context.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
+    val today = LocalDate.now().toString()
+    val savedDate = prefs.getString(KEY_FIRESTORE_WINDOW_DATE, "") ?: ""
+    val savedSlot = prefs.getInt(KEY_FIRESTORE_WINDOW_SLOT, -1)
+
+    return !(savedDate == today && savedSlot == slot)
+}
+
+private fun markFirestoreWindowUsed(context: Context) {
+    val slot = currentFirestoreWindowSlot()
+    if (slot == 0) return
+
+    context.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_FIRESTORE_WINDOW_DATE, LocalDate.now().toString())
+        .putInt(KEY_FIRESTORE_WINDOW_SLOT, slot)
+        .apply()
+}
+
+private fun isFirstInstallSyncDone(context: Context): Boolean {
+    return context.getSharedPreferences(PREF_FIRST_INSTALL_SYNC, Context.MODE_PRIVATE)
+        .getBoolean(KEY_FIRST_INSTALL_SYNC_DONE, false)
+}
+
+private fun markFirstInstallSyncDone(context: Context) {
+    context.getSharedPreferences(PREF_FIRST_INSTALL_SYNC, Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean(KEY_FIRST_INSTALL_SYNC_DONE, true)
+        .apply()
+}
+
 // import androidx.compose.foundation.isSystemInDarkTheme
 /* ------------------ ENTRY (PUBLIC) ------------------ */
 
@@ -149,9 +200,21 @@ fun HomeScreen(
         }
     }
 
-    // ✅ Restore previous behavior: auto-sync when Home opens
-    LaunchedEffect(Unit) {
-        vm.refresh(showBannerIfUpdated = true)
+    var homeInitialRefreshDone by rememberSaveable { mutableStateOf(false) }
+
+    // Run the initial refresh only once for this screen state so Home tab opens instantly on later switches.
+    LaunchedEffect(homeInitialRefreshDone) {
+        if (!homeInitialRefreshDone) {
+            homeInitialRefreshDone = true
+
+            if (!isFirstInstallSyncDone(ctx)) {
+                vm.refresh(showBannerIfUpdated = true, allowDataRead = true)
+                markFirstInstallSyncDone(ctx)
+            } else if (canUseFirestoreWindow(ctx)) {
+                markFirestoreWindowUsed(ctx)
+                vm.refresh(showBannerIfUpdated = true, allowDataRead = true)
+            }
+        }
     }
 
     // Keep VM query in sync (VM items depends on it)
@@ -208,48 +271,19 @@ fun HomeScreen(
             ctx.registerReceiver(receiver, filter)
         }
 
-        // 2) Firestore: listen only the latest notice doc
-        val prefs = ctx.getSharedPreferences("admin_notices", Context.MODE_PRIVATE)
-        val lastShownKey = "last_notice_id"
-
-        reg = db.collection("notices")
-            .orderBy("createdAtMs", Query.Direction.DESCENDING)
-            .limit(1)
-            .addSnapshotListener { snap, e ->
-                if (e != null) return@addSnapshotListener
-                val snapshot = snap ?: return@addSnapshotListener
-
-                val d = snapshot.documents.firstOrNull() ?: return@addSnapshotListener
-                val id = d.id
-                val ms = d.getLong("releaseAtMs") ?: (d.getLong("createdAtMs") ?: 0L)
-
-                val lastId = prefs.getString(lastShownKey, "") ?: ""
-                val lastTs = prefs.getLong("last_notice_ts", 0L)
-
-                if (id == lastId && ms <= lastTs) return@addSnapshotListener
-
-                prefs.edit()
-                    .putString(lastShownKey, id)
-                    .putLong("last_notice_ts", ms)
-                    .apply()
-
-                val t = (d.getString("title") ?: "").ifBlank { "Transport Notice" }
-                val b = (d.getString("body") ?: "").ifBlank { d.getString("extractedText") ?: "" }
-                if (b.isBlank()) return@addSnapshotListener
-
-                // In-app popup
-                noticeTitle = t
-                noticeBody = b
-                noticeDate = formatDate(ms)
-                showNoticeAlert = true
-
-                // System notification
-                postNoticeNotificationV2(ctx, t, b)
-            }
+        // 2) Firestore latest-notice listener removed to keep reads low.
+        // New notices still appear instantly through the broadcast receiver above.
+        reg = null
 
         onDispose {
-            reg?.remove()
-            try { ctx.unregisterReceiver(receiver) } catch (_: Throwable) {}
+            try {
+                reg?.remove()
+            } catch (_: Throwable) {
+            }
+            try {
+                ctx.unregisterReceiver(receiver)
+            } catch (_: Throwable) {
+            }
         }
     }
 

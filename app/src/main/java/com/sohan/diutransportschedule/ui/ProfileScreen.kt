@@ -904,6 +904,10 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 vm.setNotificationsEnabled(false)
                                             } else {
                                                 vm.setNotificationsEnabled(true)
+                                                alarmSound5mEnabled = false
+                                                alertPrefs.edit()
+                                                    .putBoolean("alarm_sound_5m", false)
+                                                    .apply()
                                             }
                                         }
                                     )
@@ -1057,19 +1061,19 @@ fun ProfileScreen(vm: HomeViewModel) {
 
                                     vm.setNotificationsEnabled(finalEnabled)
 
-                                    alarmSound5mEnabled = finalEnabled
+                                    alarmSound5mEnabled = false
                                     alarmVibrate5mEnabled = finalEnabled
 
                                     alertPrefs.edit()
-                                        .putBoolean("alarm_sound_5m", finalEnabled)
+                                        .putBoolean("alarm_sound_5m", false)
                                         .putBoolean("alarm_vibrate_5m", finalEnabled)
                                         .apply()
 
                                     showToggleMessage(
                                         if (finalEnabled) {
-                                            "Notifications, ringtone and vibration ON"
+                                            "Notifications ON, ringtone OFF, vibration ON"
                                         } else {
-                                            "Notifications, ringtone and vibration OFF"
+                                            "Notifications OFF, ringtone OFF, vibration OFF"
                                         }
                                     )
                                 },
@@ -1444,7 +1448,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                         )
 
                         Text(
-                            text = "Developed by Sohan",
+                            text = "Developed by Field-Chef Labs",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (dark)
                                 MaterialTheme.colorScheme.secondary

@@ -1,10 +1,6 @@
 package com.sohan.diutransportschedule.ui
 
 import android.annotation.SuppressLint
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.runtime.getValue
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -52,12 +48,7 @@ fun PremiumBottomBar(
         BottomTabUi(BottomTab.PROFILE, "Settings", Icons.Filled.Settings)
     )
 
-    var localSelected by remember { mutableStateOf(selected) }
-    LaunchedEffect(selected) {
-        localSelected = selected
-    }
-
-    val selectedIndex = tabs.indexOfFirst { it.tab == localSelected }.coerceAtLeast(0)
+    val selectedIndex = tabs.indexOfFirst { it.tab == selected }.coerceAtLeast(0)
     val slotCount = tabs.size
 
     Box(
@@ -88,16 +79,8 @@ fun PremiumBottomBar(
             ) {
                 tabs.forEachIndexed { index, item ->
                     val isSelected = selectedIndex == index
-                    val hiddenAlpha by animateFloatAsState(
-                        targetValue = if (isSelected) 0f else 1f,
-                        animationSpec = tween(durationMillis = 180),
-                        label = "tabAlpha_$index"
-                    )
-                    val hiddenScale by animateFloatAsState(
-                        targetValue = if (isSelected) 0.96f else 1f,
-                        animationSpec = tween(durationMillis = 220),
-                        label = "tabScale_$index"
-                    )
+                    val hiddenAlpha = if (isSelected) 0f else 1f
+                    val hiddenScale = if (isSelected) 0.96f else 1f
 
                     Box(
                         modifier = Modifier
@@ -115,7 +98,6 @@ fun PremiumBottomBar(
                             label = item.label,
                             selected = false,
                             onClick = {
-                                localSelected = item.tab
                                 onSelect(item.tab)
                             }
                         )
@@ -130,22 +112,8 @@ fun PremiumBottomBar(
                 .padding(horizontal = 10.dp)
         ) {
             val slotWidth = maxWidth / slotCount
-            val animatedIndex by animateFloatAsState(
-                targetValue = selectedIndex.toFloat(),
-                animationSpec = tween(
-                    durationMillis = 220,
-                    easing = FastOutSlowInEasing
-                ),
-                label = "selectedTabIndex"
-            )
-            val animatedOffsetX by animateDpAsState(
-                targetValue = slotWidth * animatedIndex,
-                animationSpec = tween(
-                    durationMillis = 220,
-                    easing = FastOutSlowInEasing
-                ),
-                label = "selectedTabOffsetX"
-            )
+            val animatedIndex = selectedIndex.toFloat()
+            val animatedOffsetX = slotWidth * animatedIndex
 
             Box(
                 modifier = Modifier
@@ -158,7 +126,6 @@ fun PremiumBottomBar(
                     icon = tabs[selectedIndex].icon,
                     label = tabs[selectedIndex].label,
                     onClick = {
-                        localSelected = tabs[selectedIndex].tab
                         onSelect(tabs[selectedIndex].tab)
                     }
                 )
@@ -172,14 +139,7 @@ private fun FloatingSelectedTabButton(
     label: String,
     onClick: () -> Unit
 ) {
-    val iconScale by animateFloatAsState(
-        targetValue = 1f,
-        animationSpec = tween(
-            durationMillis = 220,
-            easing = FastOutSlowInEasing
-        ),
-        label = "floatingIconScale"
-    )
+    val iconScale = 1f
     Surface(
         onClick = onClick,
         modifier = Modifier
@@ -217,11 +177,7 @@ private fun PremiumTabItem(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val pad by animateDpAsState(
-        targetValue = if (selected) 12.dp else 10.dp,
-        animationSpec = tween(durationMillis = 180),
-        label = "pad"
-    )
+    val pad = if (selected) 12.dp else 10.dp
 
     // Follow app theme (MaterialTheme), ignore system dark mode
     val selectedColor = if (MaterialTheme.colorScheme.background.luminance() > 0.5f) {

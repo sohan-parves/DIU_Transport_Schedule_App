@@ -84,7 +84,6 @@ import androidx.core.view.WindowCompat
 import android.graphics.Color
 import androidx.core.view.WindowInsetsControllerCompat
 import android.view.KeyEvent
-
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.layout.ContentScale
@@ -92,9 +91,13 @@ import androidx.compose.ui.graphics.Color as ComposeColor
 import android.view.Window
 import com.google.firebase.firestore.FirebaseFirestore
 import com.sohan.diutransportschedule.BuildConfig
-import com.sohan.diutransportschedule.sync.ApkDownloader
-import com.sohan.diutransportschedule.sync.ResolvedUpdate
-import com.sohan.diutransportschedule.sync.UpdateChecker
+import android.app.Activity
+import com.google.android.play.core.appupdate.AppUpdateManagerFactory
+import com.google.android.play.core.appupdate.AppUpdateOptions
+import com.google.android.play.core.install.model.AppUpdateType
+import com.google.android.play.core.install.model.UpdateAvailability
+import kotlinx.coroutines.tasks.await
+import android.app.AlertDialog
 
 // ==============================
 // 🔧 FIRESTORE TARGET (DEV vs PROD)
@@ -172,6 +175,72 @@ class MainActivity : ComponentActivity() {
 
         Log.d("RouteNotificationScheduler", "ADB test: scheduling alarm in ${delaySec}s")
         scheduleTestAlarmInSeconds(this, delaySec, title, text)
+    }
+
+    fun permissionBrandLabel(): String {
+        val manufacturer = Build.MANUFACTURER.lowercase()
+        return when {
+            manufacturer.contains("xiaomi") -> "MIUI"
+            manufacturer.contains("redmi") -> "MIUI"
+            manufacturer.contains("poco") -> "MIUI"
+            manufacturer.contains("samsung") -> "Samsung"
+            manufacturer.contains("oppo") -> "OPPO"
+            manufacturer.contains("realme") -> "realme UI"
+            manufacturer.contains("vivo") -> "vivo"
+            manufacturer.contains("oneplus") -> "OxygenOS"
+            else -> "Android"
+        }
+    }
+
+    fun buildPermissionIntroMessage(permission: String): String {
+        val osLabel = permissionBrandLabel()
+        return when (permission) {
+            android.Manifest.permission.ACCESS_FINE_LOCATION,
+            android.Manifest.permission.ACCESS_COARSE_LOCATION -> when (osLabel) {
+                "MIUI" -> "MIUI location permission popup আসবে। Map এবং current location ঠিকভাবে দেখাতে Allow দিন।"
+                "Samsung" -> "Samsung location permission popup আসবে। Map এবং current location ঠিকভাবে দেখাতে Allow দিন।"
+                "OPPO" -> "OPPO location permission popup আসবে। Map এবং current location ঠিকভাবে দেখাতে Allow দিন।"
+                "realme UI" -> "realme UI location permission popup আসবে। Map এবং current location ঠিকভাবে দেখাতে Allow দিন।"
+                "vivo" -> "vivo location permission popup আসবে। Map এবং current location ঠিকভাবে দেখাতে Allow দিন।"
+                "OxygenOS" -> "OxygenOS location permission popup আসবে। Map এবং current location ঠিকভাবে দেখাতে Allow দিন।"
+                else -> "Android location permission popup আসবে। Map এবং current location ঠিকভাবে দেখাতে Allow দিন।"
+            }
+
+            android.Manifest.permission.POST_NOTIFICATIONS -> when (osLabel) {
+                "MIUI" -> "MIUI notification permission popup আসবে। Route alert এবং update notification পেতে Allow দিন।"
+                "Samsung" -> "Samsung notification permission popup আসবে। Route alert এবং update notification পেতে Allow দিন।"
+                "OPPO" -> "OPPO notification permission popup আসবে। Route alert এবং update notification পেতে Allow দিন।"
+                "realme UI" -> "realme UI notification permission popup আসবে। Route alert এবং update notification পেতে Allow দিন।"
+                "vivo" -> "vivo notification permission popup আসবে। Route alert এবং update notification পেতে Allow দিন।"
+                "OxygenOS" -> "OxygenOS notification permission popup আসবে। Route alert এবং update notification পেতে Allow দিন।"
+                else -> "Android notification permission popup আসবে। Route alert এবং update notification পেতে Allow দিন।"
+            }
+
+            else -> when (osLabel) {
+                "MIUI" -> "MIUI permission popup আসবে। Continue দিলে MIUI system dialog দেখাবে।"
+                "Samsung" -> "Samsung permission popup আসবে। Continue দিলে Samsung system dialog দেখাবে।"
+                "OPPO" -> "OPPO permission popup আসবে। Continue দিলে OPPO system dialog দেখাবে।"
+                "realme UI" -> "realme UI permission popup আসবে। Continue দিলে realme UI system dialog দেখাবে।"
+                "vivo" -> "vivo permission popup আসবে। Continue দিলে vivo system dialog দেখাবে।"
+                "OxygenOS" -> "OxygenOS permission popup আসবে। Continue দিলে OxygenOS system dialog দেখাবে।"
+                else -> "Android permission popup আসবে। Continue দিলে system dialog দেখাবে।"
+            }
+        }
+    }
+
+    fun showPermissionIntroThenRequest(
+        permission: String,
+        requestAction: () -> Unit
+    ) {
+        AlertDialog.Builder(this)
+            .setTitle("Permission Required")
+            .setMessage(buildPermissionIntroMessage(permission))
+            .setCancelable(true)
+            .setPositiveButton("Continue") { _, _ ->
+                requestAction()
+            }
+            .setNegativeButton("Not now", null)
+            .show()
     }
 
     private fun scheduleTestAlarmInSeconds(context: Context, delaySec: Int, title: String, text: String) {
@@ -341,83 +410,50 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 val ctx = LocalContext.current
+                val activity = ctx as? Activity
+                val appUpdateManager = remember(ctx) { AppUpdateManagerFactory.create(ctx) }
+                var playUpdateChecked by remember { mutableStateOf(false) }
 
-                // ✅ In-app update popup (no auto-download)
-                var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
-                var pendingUpdate by remember { mutableStateOf<ResolvedUpdate.Full?>(null) }
+                val playUpdateLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartIntentSenderForResult()
+                ) {
+                    // Google Play update UI handle করবে।
+                    // app next open/resume এ আবার check করতে পারবে।
+                }
 
-                // Check once per app launch
-                LaunchedEffect(Unit) {
+                LaunchedEffect(activity, playUpdateChecked) {
+                    if (playUpdateChecked) return@LaunchedEffect
+                    playUpdateChecked = true
+
+                    if (!BuildConfig.PLAY_STORE_BUILD) return@LaunchedEffect
+                    if (activity == null) return@LaunchedEffect
+                    if (!isPlayStoreInstall(ctx)) return@LaunchedEffect
+
+                    val appUpdateInfo = try {
+                        appUpdateManager.appUpdateInfo.await()
+                    } catch (_: Throwable) {
+                        null
+                    } ?: return@LaunchedEffect
+
+                    if (appUpdateInfo.updateAvailability() != UpdateAvailability.UPDATE_AVAILABLE) {
+                        return@LaunchedEffect
+                    }
+
+                    val updateType = when {
+                        appUpdateInfo.isUpdateTypeAllowed(AppUpdateType.IMMEDIATE) -> AppUpdateType.IMMEDIATE
+                        else -> return@LaunchedEffect
+                    }
+
                     try {
-                        val u = UpdateChecker.resolveFor(BuildConfig.VERSION_NAME)
-                        // Full-only updater: if update exists, show popup.
-                        val full = u as? ResolvedUpdate.Full
-                        if (full != null) {
-                            // ✅ Show every time until the user actually updates.
-                            pendingUpdate = full
-                            showUpdateDialog = true
-                        }
-                    } catch (t: Throwable) {
-                        Log.e("AppUpdate", "Update check failed", t)
+                        appUpdateManager.startUpdateFlowForResult(
+                            appUpdateInfo,
+                            playUpdateLauncher,
+                            AppUpdateOptions.newBuilder(updateType).build()
+                        )
+                    } catch (_: Throwable) {
                     }
                 }
 
-                if (showUpdateDialog && pendingUpdate != null) {
-                    val u = pendingUpdate!!
-                    AlertDialog(
-                        onDismissRequest = { showUpdateDialog = false },
-                        title = {
-                            Text(
-                                "Update available",
-                                color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
-                            )
-                        },
-                        text = {
-                            Text(
-                                "A new version (${u.toVersionName}) is available. " +
-                                    "Do you want to download and install it now?",
-                                color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
-                            )
-                        },
-                        confirmButton = {
-                            TextButton(
-                                onClick = {
-                                    try {
-                                        // Allow retry if a previous enqueue/download got stuck
-                                        ctx.getSharedPreferences(ApkDownloader.PREFS, Context.MODE_PRIVATE)
-                                            .edit()
-                                            .putString(ApkDownloader.KEY_ENQUEUED_TO_VERSION_NAME, "")
-                                            .apply()
-                                        ApkDownloader.enqueueFull(
-                                            context = ctx,
-                                            url = u.full.url,
-                                            expectedSha256 = "",
-                                            toVersionName = u.toVersionName,
-                                            fileName = "DIUTransportSchedule-${u.toVersionName}.apk"
-                                        )
-                                    } catch (t: Throwable) {
-                                        Log.e("AppUpdate", "Failed to start download", t)
-                                    } finally {
-                                        showUpdateDialog = false
-                                    }
-                                }
-                            ) {
-                                Text(
-                                    "Download",
-                                    color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        },
-                        dismissButton = {
-                            TextButton(onClick = { showUpdateDialog = false }) {
-                                Text(
-                                    "Later",
-                                    color = if (dark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                        }
-                    )
-                }
 
                 LaunchedEffect(notifyLeadMinutes, selectedRoute, items) {
                     try {
@@ -782,6 +818,13 @@ private fun RequestStartupPermissions() {
             prefs.edit().putInt("step", step).apply()
         }
     }
+    val hostActivity = ctx as? MainActivity
+
+    fun requestPermissionWithIntro(permission: String, action: () -> Unit) {
+        hostActivity?.showPermissionIntroThenRequest(permission) {
+            action()
+        } ?: action()
+    }
 
     var showExactAlarmDialog by remember { mutableStateOf(false) }
     var showOemBgDialog by remember { mutableStateOf(false) }
@@ -803,7 +846,9 @@ private fun RequestStartupPermissions() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) {
-                postNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                requestPermissionWithIntro(Manifest.permission.POST_NOTIFICATIONS) {
+                    postNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
                 return@LaunchedEffect
             }
 
@@ -1035,6 +1080,17 @@ private fun RequestStartupPermissions() {
             }
         )
     }
+
+    // --- Location permission requests (EXAMPLES) ---
+    // Example: wrap direct location permission launches with requestPermissionWithIntro
+    // Replace:
+    // someLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    // with:
+    // requestPermissionWithIntro(Manifest.permission.ACCESS_FINE_LOCATION) {
+    //     someLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+    // }
+    // For coarse location, also use Manifest.permission.ACCESS_FINE_LOCATION as the intro key.
+    // For multiple-permission launches (fine+coarse), wrap the array launch similarly.
 }
 
 private class HomeVmFactory(
@@ -1047,6 +1103,20 @@ private class HomeVmFactory(
         }
         throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
     }
+}
+
+private fun isPlayStoreInstall(context: Context): Boolean {
+    val installer = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            context.packageManager.getInstallSourceInfo(context.packageName).installingPackageName
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getInstallerPackageName(context.packageName)
+        }
+    } catch (_: Throwable) {
+        null
+    }
+    return installer == "com.android.vending"
 }
 
 // --- Notification helpers ---
