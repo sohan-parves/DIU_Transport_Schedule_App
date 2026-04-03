@@ -201,7 +201,7 @@ fun cacheNoticeFromPush(
     )
     mergeCachedNotices(ctx, listOf(notice))
 
-    val nextVersion = maxOf(readCachedNoticeVersion(ctx), finalReleaseAtMs, createdAtMs)
+    val nextVersion = readCachedNoticeVersion(ctx) + 1L
     saveCachedNoticeVersion(ctx, nextVersion)
     setInitialNoticeSyncDone(ctx, true)
 }
@@ -218,10 +218,8 @@ fun checkAndSyncNoticesFromMeta(
         return
     }
 
-    markNoticeVersionCheckedNow(ctx)
-
     db.collection("meta")
-        .document("notices")
+        .document("notice")
         .get()
         .addOnSuccessListener { metaSnap ->
             val remoteVersion = metaSnap.getLong("version") ?: 0L
@@ -229,21 +227,28 @@ fun checkAndSyncNoticesFromMeta(
             val needsFullSync = !isInitialNoticeSyncDone(ctx) || remoteVersion > cachedVersion
 
             if (!needsFullSync) {
+                markNoticeVersionCheckedNow(ctx)
                 onDone?.invoke()
                 return@addOnSuccessListener
             }
 
             db.collection("notices")
-                .whereLessThanOrEqualTo("releaseAtMs", System.currentTimeMillis())
-                .orderBy("releaseAtMs", Query.Direction.DESCENDING)
+                .orderBy("createdAtMs", Query.Direction.DESCENDING)
                 .get()
                 .addOnSuccessListener { snap ->
+                    val now = System.currentTimeMillis()
+
                     val fetched = snap.documents.mapNotNull { doc ->
                         val title = doc.getString("title").orEmpty().ifBlank { "Notice" }
                         val body = doc.getString("body").orEmpty()
                         val createdAtMs = doc.getLong("createdAtMs") ?: 0L
-                        val releaseAtMs = doc.getLong("releaseAtMs") ?: createdAtMs
+                        val releaseAtMs = when {
+                            doc.contains("releaseAtMs") -> doc.getLong("releaseAtMs") ?: createdAtMs
+                            doc.contains("releaseDateMs") -> doc.getLong("releaseDateMs") ?: createdAtMs
+                            else -> createdAtMs
+                        }
 
+                        if (releaseAtMs > now) return@mapNotNull null
                         if (body.isBlank() && title == "Notice") return@mapNotNull null
 
                         AdminNoticeUi(
@@ -263,11 +268,9 @@ fun checkAndSyncNoticesFromMeta(
                         saveReadIds(ctx, existingRead.filter { it in ids }.toSet())
                     }
 
-                    val maxFetchedVersion = fetched.maxOfOrNull {
-                        maxOf(it.releaseAtMs, it.createdAtMs)
-                    } ?: 0L
-                    saveCachedNoticeVersion(ctx, maxOf(remoteVersion, maxFetchedVersion))
+                    saveCachedNoticeVersion(ctx, remoteVersion)
                     setInitialNoticeSyncDone(ctx, true)
+                    markNoticeVersionCheckedNow(ctx)
                     onDone?.invoke()
                 }
                 .addOnFailureListener { e ->
@@ -368,6 +371,7 @@ fun NoticeScreen(pad: PaddingValues) {
             db = db,
             onDone = {
                 readSet = readIds(ctx)
+                notices = readCachedNotices(ctx)
                 refreshFromCache()
             },
             onError = { msg ->
@@ -379,7 +383,21 @@ fun NoticeScreen(pad: PaddingValues) {
     DisposableEffect(Unit) {
         refreshFromCache()
 
-        syncAllNoticesOnce()
+        if (!isInitialNoticeSyncDone(ctx)) {
+            syncAllNoticesOnce()
+        } else {
+            checkAndSyncNoticesFromMeta(
+                ctx = ctx,
+                db = db,
+                onDone = {
+                    readSet = readIds(ctx)
+                    refreshFromCache()
+                },
+                onError = { msg ->
+                    if (notices.isEmpty()) error = msg
+                }
+            )
+        }
 
         val prefs = ctx.getSharedPreferences(PREF_ADMIN_NOTICES_CACHE, Context.MODE_PRIVATE)
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
