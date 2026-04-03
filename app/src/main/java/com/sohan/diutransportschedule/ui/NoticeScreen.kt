@@ -109,7 +109,7 @@ private const val KEY_NOTICE_WINDOW_DATE = "window_date"
 private const val KEY_NOTICE_WINDOW_SLOT = "window_slot"
 
 
-private fun isInitialNoticeSyncDone(ctx: Context): Boolean {
+fun isInitialNoticeSyncDone(ctx: Context): Boolean {
     return ctx.getSharedPreferences(PREF_NOTICES, Context.MODE_PRIVATE)
         .getBoolean(KEY_INITIAL_SYNC_DONE, false)
 }
@@ -385,18 +385,6 @@ fun NoticeScreen(pad: PaddingValues) {
 
         if (!isInitialNoticeSyncDone(ctx)) {
             syncAllNoticesOnce()
-        } else {
-            checkAndSyncNoticesFromMeta(
-                ctx = ctx,
-                db = db,
-                onDone = {
-                    readSet = readIds(ctx)
-                    refreshFromCache()
-                },
-                onError = { msg ->
-                    if (notices.isEmpty()) error = msg
-                }
-            )
         }
 
         val prefs = ctx.getSharedPreferences(PREF_ADMIN_NOTICES_CACHE, Context.MODE_PRIVATE)

@@ -247,13 +247,14 @@ fun HomeScreen(
                 vm.refresh(showBannerIfUpdated = true, allowDataRead = true)
             }
         }
-        syncNoticeCacheSilently()
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_START) {
-                syncNoticeCacheSilently()
+                if (!isInitialNoticeSyncDone(ctx) || canCheckNoticeVersionNow(ctx)) {
+                    syncNoticeCacheSilently()
+                }
             }
         }
 
