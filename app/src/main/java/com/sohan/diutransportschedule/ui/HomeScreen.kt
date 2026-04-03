@@ -76,11 +76,10 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import java.time.Instant
 import java.time.ZoneId
-import java.time.format.DateTimeFormatter
+import java.time.LocalDateTime
 // Removed WindowInsets, asPaddingValues, calculateTopPadding (not supported in this Compose version)
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -88,20 +87,24 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sohan.diutransportschedule.R
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.tasks.await
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.draw.blur
 import android.content.Intent
-import android.net.Uri
 import android.content.BroadcastReceiver
 import androidx.core.content.ContextCompat
-import com.sohan.diutransportschedule.sync.ACTION_NEW_NOTICE
 import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.ui.checkAndSyncNoticesFromMeta
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
@@ -185,8 +188,20 @@ fun HomeScreen(
     var query by rememberSaveable { mutableStateOf("") }
 
     var showUpdateOverlay by remember { mutableStateOf(false) }
+    var updatePopupDateTime by rememberSaveable { mutableStateOf("") }
 
     val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val noticeDb = remember { FirebaseFirestore.getInstance() }
+
+    fun syncNoticeCacheSilently() {
+        checkAndSyncNoticesFromMeta(
+            ctx = ctx,
+            db = noticeDb,
+            onDone = {},
+            onError = {}
+        )
+    }
 
     var showNoticeAlert by remember { mutableStateOf(false) }
     var noticeTitle by remember { mutableStateOf("") }
@@ -196,6 +211,23 @@ fun HomeScreen(
     // ✅ Auto-open update popup when update info arrives
     LaunchedEffect(showUpdate, updateMessage) {
         if (showUpdate && updateMessage.isNotBlank()) {
+            val createdAtText = try {
+                val snap = noticeDb
+                    .collection("admin_messages")
+                    .orderBy("createdAt", Query.Direction.DESCENDING)
+                    .limit(1)
+                    .get()
+                    .await()
+
+                val ts = snap.documents.firstOrNull()?.getTimestamp("createdAt")
+                ts?.toDate()?.let {
+                    java.text.SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(it)
+                }.orEmpty()
+            } catch (_: Throwable) {
+                ""
+            }
+
+            updatePopupDateTime = createdAtText
             showUpdateOverlay = true
         }
     }
@@ -215,6 +247,20 @@ fun HomeScreen(
                 vm.refresh(showBannerIfUpdated = true, allowDataRead = true)
             }
         }
+        syncNoticeCacheSilently()
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) {
+                syncNoticeCacheSilently()
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // Keep VM query in sync (VM items depends on it)
@@ -230,61 +276,9 @@ fun HomeScreen(
 
     // Low-read Notice updates: listen only to meta/notices.version
     // ✅ Notice popup + notification when a NEW notice is published
-// We listen only to the latest notice (limit 1). This is a single-document listener.
+    // We listen only to the latest notice (limit 1). This is a single-document listener.
     DisposableEffect(Unit) {
-        val db = FirebaseFirestore.getInstance()
-        var reg: ListenerRegistration? = null
-
-        val df = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH)
-        fun formatDate(ms: Long): String {
-            return try {
-                if (ms <= 0L) return ""
-                Instant.ofEpochMilli(ms)
-                    .atZone(ZoneId.systemDefault())
-                    .toLocalDate()
-                    .format(df)
-            } catch (_: Throwable) { "" }
-        }
-
-        // 1) Receive instant popup while app is open (from FCM service broadcast)
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                val i = intent ?: return
-                if (i.action != ACTION_NEW_NOTICE) return
-
-                val t = i.getStringExtra("title").orEmpty().ifBlank { "Transport Notice" }
-                val b = i.getStringExtra("body").orEmpty()
-                val ms = i.getLongExtra("tsMillis", 0L)
-                if (b.isBlank()) return
-
-                noticeTitle = t
-                noticeBody = b
-                noticeDate = formatDate(ms)
-                showNoticeAlert = true
-            }
-        }
-
-        val filter = IntentFilter(ACTION_NEW_NOTICE)
-        try {
-            ContextCompat.registerReceiver(ctx, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-        } catch (_: Throwable) {
-            ctx.registerReceiver(receiver, filter)
-        }
-
-        // 2) Firestore latest-notice listener removed to keep reads low.
-        // New notices still appear instantly through the broadcast receiver above.
-        reg = null
-
-        onDispose {
-            try {
-                reg?.remove()
-            } catch (_: Throwable) {
-            }
-            try {
-                ctx.unregisterReceiver(receiver)
-            } catch (_: Throwable) {
-            }
-        }
+        onDispose { }
     }
 
     Box(
@@ -366,6 +360,7 @@ fun HomeScreen(
             FullUpdateOverlay(
                 title = "Update",
                 message = updateMessage,
+                dateTimeText = updatePopupDateTime,
                 appDark = appDark,
                 onClose = { showUpdateOverlay = false },
                 onOk = {
@@ -797,6 +792,7 @@ private fun UpdateBanner(message: String, onOk: () -> Unit, appDark: Boolean, on
 private fun FullUpdateOverlay(
     title: String,
     message: String,
+    dateTimeText: String,
     appDark: Boolean,
     onClose: () -> Unit,
     onOk: () -> Unit
@@ -852,6 +848,14 @@ private fun FullUpdateOverlay(
                 }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+
+                if (dateTimeText.isNotBlank()) {
+                    Text(
+                        text = "Updated: $dateTimeText",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
 
                 // Full message (no truncation)
                 Text(

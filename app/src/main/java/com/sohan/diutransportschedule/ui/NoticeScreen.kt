@@ -2,13 +2,6 @@ package com.sohan.diutransportschedule.ui
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.Intent
-import android.os.Build
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,9 +25,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.shape.CircleShape
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
-import com.google.firebase.messaging.FirebaseMessaging
-import com.google.firebase.messaging.FirebaseMessagingService
-import com.google.firebase.messaging.RemoteMessage
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.unit.sp
@@ -113,12 +103,11 @@ private const val PREF_NOTICES = "notice_prefs"
 private const val KEY_READ_IDS = "read_ids" // StringSet
 
 private const val KEY_INITIAL_SYNC_DONE = "initial_sync_done"
+private const val KEY_CACHED_NOTICE_VERSION = "cached_notice_version"
+private const val PREF_NOTICE_VERSION_WINDOW = "notice_version_window"
+private const val KEY_NOTICE_WINDOW_DATE = "window_date"
+private const val KEY_NOTICE_WINDOW_SLOT = "window_slot"
 
-private const val KEY_NOTICE_TOPIC_SUBSCRIBED = "notice_topic_subscribed"
-private const val NOTICE_TOPIC = "all_users_notices"
-private const val NOTICE_CHANNEL_ID = "admin_notice_channel"
-private const val NOTICE_CHANNEL_NAME = "Admin Notices"
-private const val NOTICE_NOTIFICATION_GROUP = "diu_transport_notices"
 
 private fun isInitialNoticeSyncDone(ctx: Context): Boolean {
     return ctx.getSharedPreferences(PREF_NOTICES, Context.MODE_PRIVATE)
@@ -132,84 +121,51 @@ private fun setInitialNoticeSyncDone(ctx: Context, done: Boolean) {
         .apply()
 }
 
-private fun isNoticeTopicSubscribed(ctx: Context): Boolean {
+fun readCachedNoticeVersion(ctx: Context): Long {
     return ctx.getSharedPreferences(PREF_NOTICES, Context.MODE_PRIVATE)
-        .getBoolean(KEY_NOTICE_TOPIC_SUBSCRIBED, false)
+        .getLong(KEY_CACHED_NOTICE_VERSION, 0L)
 }
 
-private fun setNoticeTopicSubscribed(ctx: Context, done: Boolean) {
+fun saveCachedNoticeVersion(ctx: Context, version: Long) {
     ctx.getSharedPreferences(PREF_NOTICES, Context.MODE_PRIVATE)
         .edit()
-        .putBoolean(KEY_NOTICE_TOPIC_SUBSCRIBED, done)
+        .putLong(KEY_CACHED_NOTICE_VERSION, version)
         .apply()
 }
 
-private fun ensureNoticeChannel(ctx: Context) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        val manager = ctx.getSystemService(NotificationManager::class.java)
-        val existing = manager?.getNotificationChannel(NOTICE_CHANNEL_ID)
-        if (existing == null) {
-            val channel = NotificationChannel(
-                NOTICE_CHANNEL_ID,
-                NOTICE_CHANNEL_NAME,
-                NotificationManager.IMPORTANCE_DEFAULT
-            ).apply {
-                description = "Admin notice alerts"
-            }
-            manager?.createNotificationChannel(channel)
-        }
+private fun currentNoticeVersionWindowSlot(): Int {
+    val hour = java.time.LocalTime.now().hour
+    return when {
+        hour in 5..11 -> 1
+        hour in 12..16 -> 2
+        hour in 17..23 -> 3
+        else -> 0
     }
 }
 
-private fun maybeSubscribeToNoticeTopic(ctx: Context) {
-    if (isNoticeTopicSubscribed(ctx)) return
+fun canCheckNoticeVersionNow(ctx: Context): Boolean {
+    val slot = currentNoticeVersionWindowSlot()
+    if (slot == 0) return false
 
-    FirebaseMessaging.getInstance()
-        .subscribeToTopic(NOTICE_TOPIC)
-        .addOnSuccessListener {
-            setNoticeTopicSubscribed(ctx, true)
-        }
+    val prefs = ctx.getSharedPreferences(PREF_NOTICE_VERSION_WINDOW, Context.MODE_PRIVATE)
+    val today = java.time.LocalDate.now().toString()
+    val savedDate = prefs.getString(KEY_NOTICE_WINDOW_DATE, "") ?: ""
+    val savedSlot = prefs.getInt(KEY_NOTICE_WINDOW_SLOT, -1)
+
+    return !(savedDate == today && savedSlot == slot)
 }
 
-private fun showNoticeNotification(
-    ctx: Context,
-    noticeId: String,
-    title: String,
-    body: String
-) {
-    ensureNoticeChannel(ctx)
+fun markNoticeVersionCheckedNow(ctx: Context) {
+    val slot = currentNoticeVersionWindowSlot()
+    if (slot == 0) return
 
-    val packageManager = ctx.packageManager
-    val launchIntent = packageManager.getLaunchIntentForPackage(ctx.packageName)
-    val contentIntent = launchIntent?.let {
-        PendingIntent.getActivity(
-            ctx,
-            noticeId.hashCode(),
-            it.apply {
-                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra("open_notice_id", noticeId)
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-    }
-
-    val notification = NotificationCompat.Builder(ctx, NOTICE_CHANNEL_ID)
-        .setSmallIcon(android.R.drawable.ic_dialog_info)
-        .setContentTitle(title.ifBlank { "Notice" })
-        .setContentText(body.ifBlank { "You have a new notice" })
-        .setStyle(NotificationCompat.BigTextStyle().bigText(body.ifBlank { "You have a new notice" }))
-        .setAutoCancel(true)
-        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-        .setGroup(NOTICE_NOTIFICATION_GROUP)
-        .apply {
-            if (contentIntent != null) {
-                setContentIntent(contentIntent)
-            }
-        }
-        .build()
-
-    NotificationManagerCompat.from(ctx).notify(noticeId.hashCode(), notification)
+    ctx.getSharedPreferences(PREF_NOTICE_VERSION_WINDOW, Context.MODE_PRIVATE)
+        .edit()
+        .putString(KEY_NOTICE_WINDOW_DATE, java.time.LocalDate.now().toString())
+        .putInt(KEY_NOTICE_WINDOW_SLOT, slot)
+        .apply()
 }
+
 
 private fun mergeCachedNotices(ctx: Context, incoming: List<AdminNoticeUi>) {
     val existing = readCachedNotices(ctx)
@@ -234,56 +190,93 @@ fun cacheNoticeFromPush(
     createdAtMs: Long,
     releaseAtMs: Long
 ) {
+    val finalReleaseAtMs = if (releaseAtMs > 0L) releaseAtMs else createdAtMs
     val notice = AdminNoticeUi(
         id = id,
         title = title.ifBlank { "Notice" },
         body = body,
         createdAtMs = createdAtMs,
-        releaseAtMs = if (releaseAtMs > 0L) releaseAtMs else createdAtMs,
+        releaseAtMs = finalReleaseAtMs,
         isRead = false
     )
     mergeCachedNotices(ctx, listOf(notice))
+
+    val nextVersion = maxOf(readCachedNoticeVersion(ctx), finalReleaseAtMs, createdAtMs)
+    saveCachedNoticeVersion(ctx, nextVersion)
+    setInitialNoticeSyncDone(ctx, true)
 }
 
-class MyFirebaseMessagingService : FirebaseMessagingService() {
 
-    override fun onNewToken(token: String) {
-        super.onNewToken(token)
-        maybeSubscribeToNoticeTopic(applicationContext)
+fun checkAndSyncNoticesFromMeta(
+    ctx: Context,
+    db: FirebaseFirestore = FirebaseFirestore.getInstance(),
+    onDone: (() -> Unit)? = null,
+    onError: ((String?) -> Unit)? = null
+) {
+    if (!canCheckNoticeVersionNow(ctx) && isInitialNoticeSyncDone(ctx)) {
+        onDone?.invoke()
+        return
     }
 
-    override fun onMessageReceived(message: RemoteMessage) {
-        super.onMessageReceived(message)
+    markNoticeVersionCheckedNow(ctx)
 
-        val data = message.data
-        if (data.isEmpty()) return
+    db.collection("meta")
+        .document("notices")
+        .get()
+        .addOnSuccessListener { metaSnap ->
+            val remoteVersion = metaSnap.getLong("version") ?: 0L
+            val cachedVersion = readCachedNoticeVersion(ctx)
+            val needsFullSync = !isInitialNoticeSyncDone(ctx) || remoteVersion > cachedVersion
 
-        val id = data["id"].orEmpty().ifBlank {
-            data["noticeId"].orEmpty().ifBlank {
-                System.currentTimeMillis().toString()
+            if (!needsFullSync) {
+                onDone?.invoke()
+                return@addOnSuccessListener
             }
+
+            db.collection("notices")
+                .whereLessThanOrEqualTo("releaseAtMs", System.currentTimeMillis())
+                .orderBy("releaseAtMs", Query.Direction.DESCENDING)
+                .get()
+                .addOnSuccessListener { snap ->
+                    val fetched = snap.documents.mapNotNull { doc ->
+                        val title = doc.getString("title").orEmpty().ifBlank { "Notice" }
+                        val body = doc.getString("body").orEmpty()
+                        val createdAtMs = doc.getLong("createdAtMs") ?: 0L
+                        val releaseAtMs = doc.getLong("releaseAtMs") ?: createdAtMs
+
+                        if (body.isBlank() && title == "Notice") return@mapNotNull null
+
+                        AdminNoticeUi(
+                            id = doc.id,
+                            title = title,
+                            body = body,
+                            createdAtMs = createdAtMs,
+                            releaseAtMs = releaseAtMs,
+                            isRead = false
+                        )
+                    }
+
+                    mergeCachedNotices(ctx, fetched)
+                    val ids = fetched.map { it.id }.filter { it.isNotBlank() }.toSet()
+                    if (ids.isNotEmpty()) {
+                        val existingRead = readIds(ctx)
+                        saveReadIds(ctx, existingRead.filter { it in ids }.toSet())
+                    }
+
+                    val maxFetchedVersion = fetched.maxOfOrNull {
+                        maxOf(it.releaseAtMs, it.createdAtMs)
+                    } ?: 0L
+                    saveCachedNoticeVersion(ctx, maxOf(remoteVersion, maxFetchedVersion))
+                    setInitialNoticeSyncDone(ctx, true)
+                    onDone?.invoke()
+                }
+                .addOnFailureListener { e ->
+                    onError?.invoke(e.message)
+                }
         }
-        val title = data["title"].orEmpty().ifBlank { "Notice" }
-        val body = data["body"].orEmpty()
-        val createdAtMs = data["createdAtMs"]?.toLongOrNull() ?: System.currentTimeMillis()
-        val releaseAtMs = data["releaseAtMs"]?.toLongOrNull() ?: createdAtMs
-
-        cacheNoticeFromPush(
-            ctx = applicationContext,
-            id = id,
-            title = title,
-            body = body,
-            createdAtMs = createdAtMs,
-            releaseAtMs = releaseAtMs
-        )
-
-        showNoticeNotification(
-            ctx = applicationContext,
-            noticeId = id,
-            title = title,
-            body = body
-        )
-    }
+        .addOnFailureListener { e ->
+            onError?.invoke(e.message)
+        }
 }
 
 private fun readIds(ctx: Context): MutableSet<String> {
@@ -304,9 +297,6 @@ fun NoticeScreen(pad: PaddingValues) {
     val ctx = LocalContext.current
 
     val db = remember { FirebaseFirestore.getInstance() }
-    LaunchedEffect(Unit) {
-        maybeSubscribeToNoticeTopic(ctx)
-    }
 
     var notices by remember { mutableStateOf(readCachedNotices(ctx)) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -373,50 +363,23 @@ fun NoticeScreen(pad: PaddingValues) {
 
     fun syncAllNoticesOnce() {
         error = null
-        db.collection("notices")
-            .whereLessThanOrEqualTo("releaseAtMs", System.currentTimeMillis())
-            .orderBy("releaseAtMs", Query.Direction.DESCENDING)
-            .get()
-            .addOnSuccessListener { snap ->
-                val fetched = snap.documents.mapNotNull { doc ->
-                    val title = doc.getString("title").orEmpty().ifBlank { "Notice" }
-                    val body = doc.getString("body").orEmpty()
-                    val createdAtMs = doc.getLong("createdAtMs") ?: 0L
-                    val releaseAtMs = doc.getLong("releaseAtMs") ?: createdAtMs
-
-                    if (body.isBlank() && title == "Notice") return@mapNotNull null
-
-                    AdminNoticeUi(
-                        id = doc.id,
-                        title = title,
-                        body = body,
-                        createdAtMs = createdAtMs,
-                        releaseAtMs = releaseAtMs,
-                        isRead = false
-                    )
-                }
-
-                mergeCachedNotices(ctx, fetched)
-                val ids = fetched.map { it.id }.filter { it.isNotBlank() }.toSet()
-                if (ids.isNotEmpty()) {
-                    val existingRead = readIds(ctx)
-                    saveReadIds(ctx, existingRead.filter { it in ids }.toSet())
-                    readSet = readIds(ctx)
-                }
-                setInitialNoticeSyncDone(ctx, true)
+        checkAndSyncNoticesFromMeta(
+            ctx = ctx,
+            db = db,
+            onDone = {
+                readSet = readIds(ctx)
                 refreshFromCache()
+            },
+            onError = { msg ->
+                if (notices.isEmpty()) error = msg
             }
-            .addOnFailureListener { e ->
-                if (notices.isEmpty()) error = e.message
-            }
+        )
     }
 
     DisposableEffect(Unit) {
         refreshFromCache()
 
-        if (!isInitialNoticeSyncDone(ctx)) {
-            syncAllNoticesOnce()
-        }
+        syncAllNoticesOnce()
 
         val prefs = ctx.getSharedPreferences(PREF_ADMIN_NOTICES_CACHE, Context.MODE_PRIVATE)
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->

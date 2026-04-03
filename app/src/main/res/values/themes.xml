@@ -2,7 +2,7 @@
 <resources>
 
     <!-- Main app theme (Compose uses this after launch) -->
-    <style name="Theme.DIUTransportSchedule" parent="Theme.Material3.Light.NoActionBar">
+    <style name="Theme.DIUTransportSchedule" parent="Theme.Material3.Dark.NoActionBar">
         <!-- Prevent white flash behind Compose while launching -->
         <item name="android:windowBackground">@android:color/black</item>
         <!-- Optional: keep status bar/navigation consistent on launch -->
@@ -20,8 +20,6 @@
     <style name="Theme.DIUTransportSchedule.Splash" parent="Theme.SplashScreen">
         <!-- Dark splash background so it never flashes white -->
         <item name="windowSplashScreenBackground">@android:color/black</item>
-
-        <!-- Your logo in the center -->
 
         <!-- Keep icon background transparent (system mask still applies) -->
         <item name="windowSplashScreenIconBackgroundColor">@android:color/transparent</item>

@@ -116,6 +116,9 @@ import com.sohan.diutransportschedule.R
 import androidx.compose.material3.ColorScheme
 import kotlin.math.ln
 import androidx.compose.material3.MenuAnchorType
+import android.Manifest
+import android.provider.Settings
+import androidx.core.content.ContextCompat
 
 private fun ColorScheme.surfaceColorAtElevationCompat(elevation: Dp): Color {
     if (elevation == 0.dp) return surface
@@ -162,6 +165,7 @@ fun ProfileScreen(vm: HomeViewModel) {
         bottomPx.toDp()
     }
     val ctx = LocalContext.current
+
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -173,13 +177,46 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val alertPrefs =
         remember(ctx) { ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE) }
+    val hostActivity = ctx as? com.sohan.diutransportschedule.MainActivity
+
+    fun hasNotificationPermissionNow(): Boolean {
+        if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                ctx,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted && NotificationManagerCompat.from(ctx).areNotificationsEnabled()) {
+            vm.setNotificationsEnabled(true)
+            alertPrefs.edit().putBoolean("master_notifications_enabled", true).apply()
+            showToggleMessage("Notifications enabled")
+        } else {
+            vm.setNotificationsEnabled(false)
+            alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
+            showToggleMessage("Notification permission required")
+        }
+    }
+
+
     val appDefaultRingtoneUri =
         "android.resource://${ctx.packageName}/${R.raw.app_default_ringtone}"
     val appDefaultRingtoneName = "App default ringtone"
 
     LaunchedEffect(notificationsEnabled) {
+        val allowed = notificationsEnabled && hasNotificationPermissionNow()
+        if (notificationsEnabled && !allowed) {
+            vm.setNotificationsEnabled(false)
+        }
         alertPrefs.edit()
-            .putBoolean("master_notifications_enabled", notificationsEnabled)
+            .putBoolean("master_notifications_enabled", allowed)
             .apply()
     }
 
@@ -1055,30 +1092,50 @@ fun ProfileScreen(vm: HomeViewModel) {
                             Switch(
                                 checked = effectiveNotificationsEnabled,
                                 onCheckedChange = { enabled ->
-                                    val isAll =
-                                        selectedRoute.trim().equals("ALL", ignoreCase = true)
-                                    val finalEnabled = enabled && !isAll
-
-                                    vm.setNotificationsEnabled(finalEnabled)
-
-                                    alarmSound5mEnabled = false
-                                    alarmVibrate5mEnabled = finalEnabled
-
-                                    alertPrefs.edit()
-                                        .putBoolean("alarm_sound_5m", false)
-                                        .putBoolean("alarm_vibrate_5m", finalEnabled)
-                                        .apply()
-
-                                    showToggleMessage(
-                                        if (finalEnabled) {
-                                            "Notifications ON, ringtone OFF, vibration ON"
+                                    if (!enabled) {
+                                        vm.setNotificationsEnabled(false)
+                                        alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
+                                        showToggleMessage("Notifications turned off")
+                                    } else {
+                                        if (isFriday || selectedRoute.trim().equals("ALL", ignoreCase = true)) {
+                                            vm.setNotificationsEnabled(false)
+                                            alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
+                                            showToggleMessage("Select a specific route on a non-Friday to enable notifications")
+                                        } else if (hasNotificationPermissionNow()) {
+                                            vm.setNotificationsEnabled(true)
+                                            alertPrefs.edit().putBoolean("master_notifications_enabled", true).apply()
+                                            showToggleMessage("Notifications enabled")
                                         } else {
-                                            "Notifications OFF, ringtone OFF, vibration OFF"
+                                            vm.setNotificationsEnabled(false)
+                                            alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
+
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                                hostActivity?.showPermissionIntroThenRequest(
+                                                    permission = Manifest.permission.POST_NOTIFICATIONS,
+                                                    requestAction = {
+                                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                                    }
+                                                )
+                                            } else {
+                                                try {
+                                                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                                        putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    ctx.startActivity(intent)
+                                                } catch (_: Throwable) {
+                                                    val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                                        data = Uri.fromParts("package", ctx.packageName, null)
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    ctx.startActivity(fallback)
+                                                }
+                                                showToggleMessage("Enable app notifications from Settings")
+                                            }
                                         }
-                                    )
+                                    }
                                 },
-                                enabled = !isFriday && !selectedRoute.trim()
-                                    .equals("ALL", ignoreCase = true),
+                                enabled = !isFriday && !selectedRoute.trim().equals("ALL", ignoreCase = true),
                                 colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                             )
                         }
