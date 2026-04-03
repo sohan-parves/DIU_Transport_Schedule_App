@@ -39,11 +39,13 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.work.*
 import com.google.android.gms.location.*
 import kotlinx.coroutines.flow.map
-import org.osmdroid.config.Configuration
+import org.osmdroid.config.Configuration as OsmConfiguration
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
+import org.osmdroid.views.overlay.compass.CompassOverlay
+import org.osmdroid.views.overlay.gestures.RotationGestureOverlay
 import java.io.File
 import androidx.compose.ui.graphics.luminance
 import android.Manifest
@@ -56,6 +58,7 @@ import kotlinx.coroutines.tasks.await
 import android.graphics.drawable.ShapeDrawable
 import android.graphics.drawable.shapes.OvalShape
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -71,18 +74,37 @@ import android.graphics.RectF
 import android.text.TextPaint
 import kotlin.math.max
 import androidx.compose.ui.zIndex
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
-import android.graphics.Point
 import org.osmdroid.events.MapListener
 import org.osmdroid.events.ScrollEvent
 import org.osmdroid.events.ZoomEvent
+import androidx.compose.material.icons.filled.Explore
+import androidx.compose.ui.draw.rotate
+import kotlin.math.abs
+import androidx.compose.material3.Text
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import android.view.MotionEvent
+import android.animation.ValueAnimator
+import android.view.animation.LinearInterpolator
+import org.osmdroid.tileprovider.MapTileProviderArray
+import org.osmdroid.tileprovider.MapTileProviderBase
+import org.osmdroid.tileprovider.MapTileProviderBasic
+import org.osmdroid.tileprovider.modules.IArchiveFile
+import org.osmdroid.tileprovider.modules.MBTilesFileArchive
+import org.osmdroid.tileprovider.modules.MapTileFileArchiveProvider
+import org.osmdroid.tileprovider.modules.MapTileModuleProviderBase
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.tileprovider.tilesource.XYTileSource
+import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
+import android.content.res.Configuration
+import androidx.collection.LruCache
 
 sealed class OfflineState {
     data object NotDownloaded : OfflineState()
@@ -1414,6 +1436,44 @@ fun LiveMapScreen() {
     }
 }
 
+private val routeStopMarkerBitmapCache = object : LruCache<String, Bitmap>(160) {}
+private val liveLocationMarkerBitmapCache = object : LruCache<String, Bitmap>(8) {}
+private fun buildLiveLocationMarkerCacheKey(ctx: Context): String {
+    val nightMode = ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+    val densityBucket = (ctx.resources.displayMetrics.density * 100).toInt()
+    return "$nightMode#$densityBucket"
+}
+
+private fun getCachedLiveLocationMarkerBitmap(ctx: Context): Bitmap {
+    val key = buildLiveLocationMarkerCacheKey(ctx)
+    liveLocationMarkerBitmapCache.get(key)?.let { cached ->
+        if (!cached.isRecycled) return cached
+    }
+
+    val created = createMyLocationMarkerBitmap(ctx)
+    liveLocationMarkerBitmapCache.put(key, created)
+    return created
+}
+
+private fun buildRouteStopMarkerCacheKey(ctx: Context, label: String): String {
+    val nightMode = ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+    val densityBucket = (ctx.resources.displayMetrics.density * 100).toInt()
+    return "$nightMode#$densityBucket#${label.trim()}"
+}
+
+private fun getCachedRouteStopMarkerBitmap(ctx: Context, label: String): Bitmap {
+    val safeLabel = label.trim().ifBlank { "Stop" }
+    val key = buildRouteStopMarkerCacheKey(ctx, safeLabel)
+
+    routeStopMarkerBitmapCache.get(key)?.let { cached ->
+        if (!cached.isRecycled) return cached
+    }
+
+    val created = createRouteStopMarkerBitmap(ctx, safeLabel)
+    routeStopMarkerBitmapCache.put(key, created)
+    return created
+}
+
 private fun createScaledDrawableBitmap(
     ctx: Context,
     drawableRes: Int,
@@ -1433,6 +1493,11 @@ private fun createRouteStopMarkerBitmap(
     label: String
 ): Bitmap {
     val density = ctx.resources.displayMetrics.density
+    val isDark = (ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
+
+    val bubbleColor = if (isDark) android.graphics.Color.parseColor("#0A1F44") else android.graphics.Color.WHITE
+    val textColor = if (isDark) android.graphics.Color.WHITE else android.graphics.Color.parseColor("#111111")
+    val shadowColor = if (isDark) android.graphics.Color.argb(90, 0, 0, 0) else android.graphics.Color.argb(65, 0, 0, 0)
     val pinWidth = (44f * density).toInt()
     val pinHeight = (48f * density).toInt()
     val bubblePadH = 10f * density
@@ -1448,7 +1513,7 @@ private fun createRouteStopMarkerBitmap(
     val pinLift = 6f * density
 
     val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.parseColor("#111111")
+        color = textColor
         this.textSize = textSize
         typeface = android.graphics.Typeface.create(
             android.graphics.Typeface.DEFAULT,
@@ -1487,8 +1552,8 @@ private fun createRouteStopMarkerBitmap(
     canvas.drawOval(baseShadowRect, baseShadowPaint)
 
     val bubblePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.WHITE
-        setShadowLayer(shadowBlur, 0f, shadowDy, android.graphics.Color.argb(65, 0, 0, 0))
+        color = bubbleColor
+        setShadowLayer(shadowBlur, 0f, shadowDy, shadowColor)
     }
 
     canvas.drawRoundRect(
@@ -1598,7 +1663,7 @@ private fun OsmdroidLiveMap(
 ){
     val ctx = LocalContext.current
     LaunchedEffect(Unit) {
-        Configuration.getInstance().userAgentValue = ctx.packageName
+        org.osmdroid.config.Configuration.getInstance().userAgentValue = ctx.packageName
     }
 
     val fused = remember { LocationServices.getFusedLocationProviderClient(ctx) }
@@ -1608,39 +1673,406 @@ private fun OsmdroidLiveMap(
     var hasCenteredOnUserOnce by remember { mutableStateOf(false) }
     var hasFittedRoute by remember(routeId, routeText) { mutableStateOf(false) }
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
-    var userScreenOffset by remember { mutableStateOf<IntOffset?>(null) }
+    var mapOrientationDeg by remember { mutableFloatStateOf(0f) }
+    var deviceHeadingDeg by remember { mutableFloatStateOf(0f) }
+    var compassOverlayRef by remember { mutableStateOf<CompassOverlay?>(null) }
+    var rotationOverlayRef by remember { mutableStateOf<RotationGestureOverlay?>(null) }
+    var livePulseAnimator by remember { mutableStateOf<ValueAnimator?>(null) }
+    var offlineTileProviderRef by remember { mutableStateOf<MapTileProviderBase?>(null) }
+    var offlineArchiveRef by remember { mutableStateOf<IArchiveFile?>(null) }
+    var appliedMbtilesPath by remember { mutableStateOf<String?>(null) }
+    var lastRenderedRouteSignature by remember(routeId, routeText) { mutableStateOf<String?>(null) }
+    var lastRenderedLiveLocationKey by remember { mutableStateOf<String?>(null) }
+    var lastRadarAnimationFrameMs by remember { mutableLongStateOf(0L) }
+    var lastRadarPhaseBucket by remember { mutableIntStateOf(-1) }
     val latestCenterOnUserRequest by rememberUpdatedState(centerOnUserRequest)
     val latestOnCenterConsumed by rememberUpdatedState(onCenterConsumed)
     val latestRoutePoints by rememberUpdatedState(routePoints)
-    val density = LocalDensity.current
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val compassCardColor = if (isDark) Color(0xFF0A1F44).copy(alpha = 0.96f) else Color.White.copy(alpha = 0.96f)
+    val compassPrimaryText = if (isDark) Color.White else Color(0xFF111827)
+    val compassNorthText = if (isDark) Color(0xFFFF6B6B) else Color(0xFFE53935)
+    val compassOuterRing = if (isDark) Color(0xFF08162F) else Color(0xFF0F172A)
+    val compassInnerCore = if (isDark) Color(0xFF08162F) else Color(0xFF0F172A)
+    val compassAccent = if (isDark) Color.White.copy(alpha = 0.36f) else Color.White.copy(alpha = 0.30f)
+    val compassCrossMajor = if (isDark) Color.White.copy(alpha = 0.38f) else Color.White.copy(alpha = 0.32f)
+    val compassCrossMinor = if (isDark) Color.White.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.22f)
+    val compassNorthNeedle = if (isDark) Color(0xFFFF5A52) else Color(0xFFE53935)
+    val compassSouthNeedle = Color.White
 
-    val pulseTransition = rememberInfiniteTransition(label = "my_location_pulse")
-    val pulseScale by pulseTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 2.2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "my_location_pulse_scale"
-    )
-    val pulseAlpha by pulseTransition.animateFloat(
-        initialValue = 0.22f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "my_location_pulse_alpha"
-    )
+    val sensorManager = remember {
+        ctx.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    }
 
-    fun refreshUserScreenOffset(map: MapView) {
-        val point = lastUserLocation ?: run {
-            userScreenOffset = null
+
+    DisposableEffect(sensorManager) {
+        val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+
+        if (rotationSensor == null) {
+            onDispose { }
+        } else {
+            val rotationMatrix = FloatArray(9)
+            val orientationAngles = FloatArray(3)
+
+            val listener = object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent) {
+                    if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
+
+                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                    SensorManager.getOrientation(rotationMatrix, orientationAngles)
+
+                    val azimuthDeg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
+                    deviceHeadingDeg = ((azimuthDeg % 360f) + 360f) % 360f
+                }
+
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+            }
+
+            sensorManager.registerListener(
+                listener,
+                rotationSensor,
+                SensorManager.SENSOR_DELAY_GAME
+            )
+
+            onDispose {
+                sensorManager.unregisterListener(listener)
+            }
+        }
+    }
+
+    fun updateLiveLocationMarker(map: MapView, point: GeoPoint) {
+        val existingMarker = map.overlays.firstOrNull { overlay ->
+            overlay is Marker && overlay.relatedObject == "live_location_marker"
+        } as? Marker
+
+        val marker = existingMarker ?: Marker(map).apply {
+            relatedObject = "live_location_marker"
+            title = "Current location"
+            infoWindow = null
+            icon = android.graphics.drawable.BitmapDrawable(
+                ctx.resources,
+                getCachedLiveLocationMarkerBitmap(ctx)
+            )
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+            alpha = 1f
+        }
+
+        marker.position = point
+
+        if (existingMarker == null) {
+            map.overlays.add(marker)
+        }
+    }
+
+    fun updateLiveLocationRadar(map: MapView, point: GeoPoint, phase: Float) {
+        val existingRadar = map.overlays.firstOrNull { overlay ->
+            overlay is Polygon && overlay.title == "live_location_accuracy_circle"
+        } as? Polygon
+
+        val radar = existingRadar ?: Polygon().apply {
+            title = "live_location_accuracy_circle"
+        }
+
+        val zoom = map.zoomLevelDouble.toFloat()
+        val metersPerPixel = org.osmdroid.util.TileSystem.GroundResolution(
+            point.latitude,
+            map.zoomLevelDouble
+        ).toFloat().coerceAtLeast(0.01f)
+
+        val accuracyBaseMeters = when {
+            lastAccuracyMeters != null && lastAccuracyMeters!! > 1f -> maxOf(lastAccuracyMeters!! * 0.9f, 18f)
+            else -> 22f
+        }
+
+        val baseRadiusPx = when {
+            zoom >= 19f -> 20f
+            zoom >= 18f -> 22f
+            zoom >= 17f -> 24f
+            zoom >= 16f -> 26f
+            zoom >= 15f -> 30f
+            zoom >= 14f -> 34f
+            zoom >= 13f -> 38f
+            else -> 44f
+        }
+        val animatedRadiusPx = baseRadiusPx * (0.80f + (phase * 1.45f))
+        val circleSteps = when {
+            zoom >= 18f -> 36
+            zoom >= 16f -> 32
+            zoom >= 14f -> 28
+            else -> 24
+        }
+        val visibleRadiusMeters = animatedRadiusPx * metersPerPixel
+        val animatedRadiusMeters = maxOf(accuracyBaseMeters, visibleRadiusMeters)
+
+        val strokeAlpha = (165f * (1f - phase)).toInt().coerceIn(0, 165)
+        val fillAlpha = (42f * (1f - phase)).toInt().coerceIn(0, 42)
+        val strokeWidthPx = when {
+            zoom >= 18f -> 3f
+            zoom >= 16f -> 4f
+            zoom >= 14f -> 5f
+            else -> 6f
+        }
+
+        radar.points = Polygon.pointsAsCircle(point, animatedRadiusMeters.toDouble())
+        radar.outlinePaint.apply {
+            color = android.graphics.Color.argb(strokeAlpha, 10, 132, 255)
+            strokeWidth = strokeWidthPx
+            isAntiAlias = true
+        }
+        radar.fillPaint.color = android.graphics.Color.argb(fillAlpha, 10, 132, 255)
+
+        if (existingRadar == null) {
+            map.overlays.add(radar)
+        }
+    }
+
+    fun updateRoutePolylineOverlays(map: MapView, points: List<GeoPoint>, drawRoadLine: Boolean) {
+        val existingOuter = map.overlays.firstOrNull { overlay ->
+            overlay is Polyline && overlay.title == "selected_route_polyline_outer"
+        } as? Polyline
+
+        val existingInner = map.overlays.firstOrNull { overlay ->
+            overlay is Polyline && overlay.title == "selected_route_polyline_inner"
+        } as? Polyline
+
+        if (!drawRoadLine || points.isEmpty()) {
+            map.overlays.removeAll { overlay ->
+                overlay is Polyline && (
+                        overlay.title == "selected_route_polyline_outer" ||
+                                overlay.title == "selected_route_polyline_inner"
+                        )
+            }
             return
         }
-        val projected = map.projection.toPixels(point, Point())
-        userScreenOffset = IntOffset(projected.x, projected.y)
+
+        val outer = existingOuter ?: Polyline().apply {
+            title = "selected_route_polyline_outer"
+            outlinePaint.color = android.graphics.Color.parseColor("#111827")
+            outlinePaint.strokeWidth = 22f
+            outlinePaint.isAntiAlias = true
+            outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+            outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
+        }
+        outer.setPoints(points)
+        if (existingOuter == null) {
+            map.overlays.add(outer)
+        }
+
+        val inner = existingInner ?: Polyline().apply {
+            title = "selected_route_polyline_inner"
+            outlinePaint.color = android.graphics.Color.parseColor("#2563EB")
+            outlinePaint.strokeWidth = 12f
+            outlinePaint.isAntiAlias = true
+            outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
+            outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
+        }
+        inner.setPoints(points)
+        if (existingInner == null) {
+            map.overlays.add(inner)
+        }
+    }
+
+    fun focusMapOnStop(mapView: MapView, point: GeoPoint) {
+        val targetZoom = maxOf(mapView.zoomLevelDouble, 18.0)
+        mapView.controller.animateTo(point, targetZoom, 550L)
+        mapView.postInvalidate()
+    }
+
+    fun updateRouteStopMarkers(map: MapView, points: List<GeoPoint>, labels: List<String>) {
+        val wantedCount = minOf(points.size, labels.size)
+        val existingMarkers = map.overlays
+            .filterIsInstance<Marker>()
+            .filter { it.relatedObject?.toString()?.startsWith("selected_route_marker_") == true }
+            .associateBy { it.relatedObject?.toString().orEmpty() }
+            .toMutableMap()
+
+        if (wantedCount == 0) {
+            map.overlays.removeAll { overlay ->
+                overlay is Marker && overlay.relatedObject?.toString()?.startsWith("selected_route_marker_") == true
+            }
+            return
+        }
+
+        for (index in 0 until wantedCount) {
+            val point = points[index]
+            val label = labels[index].trim().ifBlank { "Stop ${index + 1}" }
+            val key = "selected_route_marker_$index"
+
+            val existingMarker = existingMarkers.remove(key)
+
+            if (existingMarker != null) {
+                existingMarker.position = point
+                if (existingMarker.title != label) {
+                    existingMarker.title = label
+                    existingMarker.icon = android.graphics.drawable.BitmapDrawable(
+                        ctx.resources,
+                        getCachedRouteStopMarkerBitmap(ctx, label)
+                    )
+                }
+                existingMarker.setOnMarkerClickListener { marker, mapView ->
+                    focusMapOnStop(mapView, marker.position)
+                    true
+                }
+            } else {
+                val marker = Marker(map).apply {
+                    position = point
+                    title = label
+                    infoWindow = null
+                    relatedObject = key
+                    alpha = 0.98f
+                    icon = android.graphics.drawable.BitmapDrawable(
+                        ctx.resources,
+                        getCachedRouteStopMarkerBitmap(ctx, label)
+                    )
+                    setAnchor(Marker.ANCHOR_CENTER, 0.90f)
+                    setOnMarkerClickListener { clickedMarker, mapView ->
+                        focusMapOnStop(mapView, clickedMarker.position)
+                        true
+                    }
+                }
+                map.overlays.add(marker)
+            }
+        }
+
+        if (existingMarkers.isNotEmpty()) {
+            map.overlays.removeAll { overlay ->
+                overlay is Marker && overlay.relatedObject?.toString() in existingMarkers.keys
+            }
+        }
+    }
+
+    fun removeRouteOverlays(map: MapView) {
+        map.overlays.removeAll { overlay ->
+            (overlay is Polyline && (
+                    overlay.title == "selected_route_polyline_outer" ||
+                            overlay.title == "selected_route_polyline_inner"
+                    )) ||
+                    (overlay is Marker && overlay.relatedObject?.toString()?.startsWith("selected_route_marker_") == true)
+        }
+    }
+
+    fun buildRouteRenderSignature(
+        routePoints: List<GeoPoint>,
+        routeStopMarkerPoints: List<GeoPoint>,
+        routeStopMarkerLabels: List<String>,
+        drawRoadLine: Boolean
+    ): String {
+        val firstRoute = routePoints.firstOrNull()
+        val lastRoute = routePoints.lastOrNull()
+        val firstStop = routeStopMarkerPoints.firstOrNull()
+        val lastStop = routeStopMarkerPoints.lastOrNull()
+        val labelsHash = routeStopMarkerLabels.joinToString("|").hashCode()
+
+        return listOf(
+            drawRoadLine,
+            routePoints.size,
+            firstRoute?.latitude,
+            firstRoute?.longitude,
+            lastRoute?.latitude,
+            lastRoute?.longitude,
+            routeStopMarkerPoints.size,
+            firstStop?.latitude,
+            firstStop?.longitude,
+            lastStop?.latitude,
+            lastStop?.longitude,
+            labelsHash
+        ).joinToString("#")
+    }
+
+    fun releaseTileProviderResources() {
+        runCatching { offlineTileProviderRef?.detach() }
+        runCatching { offlineArchiveRef?.close() }
+        offlineTileProviderRef = null
+        offlineArchiveRef = null
+        appliedMbtilesPath = null
+    }
+
+    fun applyTileProvider(map: MapView, mbtilesPath: String?) {
+        val offlineFile = mbtilesPath
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.exists() && it.isFile && it.length() > 0L }
+
+        if (offlineFile != null) {
+            if (appliedMbtilesPath == offlineFile.absolutePath && offlineTileProviderRef != null) {
+                map.setUseDataConnection(false)
+                return
+            }
+
+            releaseTileProviderResources()
+
+            try {
+                val archive = MBTilesFileArchive.getDatabaseFileArchive(offlineFile)
+                val tileSource = XYTileSource(
+                    "mbtiles_${offlineFile.nameWithoutExtension}",
+                    0,
+                    24,
+                    256,
+                    ".png",
+                    arrayOf("")
+                )
+                val registerReceiver = SimpleRegisterReceiver(ctx)
+                val archiveProvider = MapTileFileArchiveProvider(
+                    registerReceiver,
+                    tileSource,
+                    arrayOf<IArchiveFile>(archive)
+                )
+                val tileProvider = MapTileProviderArray(
+                    tileSource,
+                    registerReceiver,
+                    arrayOf<MapTileModuleProviderBase>(archiveProvider)
+                )
+
+                map.setTileProvider(tileProvider)
+                map.setTileSource(tileSource)
+                map.setUseDataConnection(false)
+
+                offlineArchiveRef = archive
+                offlineTileProviderRef = tileProvider
+                appliedMbtilesPath = offlineFile.absolutePath
+            } catch (_: Exception) {
+                releaseTileProviderResources()
+
+                val onlineProvider = MapTileProviderBasic(ctx.applicationContext)
+                map.setTileProvider(onlineProvider)
+                map.setTileSource(TileSourceFactory.MAPNIK)
+                map.setUseDataConnection(true)
+
+                offlineTileProviderRef = onlineProvider
+                appliedMbtilesPath = "__online__"
+            }
+        } else {
+            if (appliedMbtilesPath == "__online__" && offlineTileProviderRef != null) {
+                map.setUseDataConnection(true)
+                return
+            }
+
+            releaseTileProviderResources()
+
+            val onlineProvider = MapTileProviderBasic(ctx.applicationContext)
+            map.setTileProvider(onlineProvider)
+            map.setTileSource(TileSourceFactory.MAPNIK)
+            map.setUseDataConnection(true)
+
+            offlineTileProviderRef = onlineProvider
+            appliedMbtilesPath = "__online__"
+        }
+    }
+
+    fun sortMapOverlays(map: MapView) {
+        map.overlays.sortBy { overlay ->
+            when {
+                overlay === rotationOverlayRef -> 0
+                overlay is Polyline && overlay.title == "selected_route_polyline_outer" -> 10
+                overlay is Polyline && overlay.title == "selected_route_polyline_inner" -> 11
+                overlay is Polygon && overlay.title == "live_location_accuracy_circle" -> 90
+                overlay is Marker && overlay.relatedObject?.toString()?.startsWith("selected_route_marker_") == true -> 120
+                overlay is Marker && overlay.relatedObject == "live_location_marker" -> 130
+                overlay === compassOverlayRef -> 200
+                overlay is Polyline -> 20
+                else -> 50
+            }
+        }
     }
 
     fun updateUserLocationOnMap(location: Location, shouldCenterNow: Boolean) {
@@ -1649,11 +2081,7 @@ private fun OsmdroidLiveMap(
         lastAccuracyMeters = if (location.hasAccuracy()) location.accuracy else null
 
         mapViewRef?.let { map ->
-            map.overlays.removeAll { overlay ->
-                (overlay is Marker && overlay.relatedObject == "live_location_marker")
-            }
 
-            val accuracyMeters = if (location.hasAccuracy()) location.accuracy else null
 
             if (shouldCenterNow) {
                 map.controller.setZoom(maxOf(map.zoomLevelDouble, 17.0))
@@ -1661,17 +2089,27 @@ private fun OsmdroidLiveMap(
                 hasCenteredOnUserOnce = true
             }
 
-            map.overlays.sortBy { overlay ->
-                when {
-                    overlay is Marker && overlay.relatedObject == "live_location_marker" -> 100
-                    overlay is Polygon && overlay.title == "live_location_accuracy_circle" -> 90
-                    overlay is Marker && overlay.relatedObject == "selected_route_marker" -> 50
-                    overlay is Polyline -> 10
-                    else -> 0
-                }
+            val hadMarker = map.overlays.any { overlay ->
+                overlay is Marker && overlay.relatedObject == "live_location_marker"
             }
+            val hadRadar = map.overlays.any { overlay ->
+                overlay is Polygon && overlay.title == "live_location_accuracy_circle"
+            }
+
+            updateLiveLocationMarker(map, point)
+            updateLiveLocationRadar(map, point, 0f)
+            lastRenderedLiveLocationKey = listOf(
+                point.latitude,
+                point.longitude,
+                lastAccuracyMeters,
+                map.zoomLevelDouble.toFloat().toInt()
+            ).joinToString("#")
+
+            if (!hadMarker || !hadRadar) {
+                sortMapOverlays(map)
+            }
+
             map.postInvalidate()
-            refreshUserScreenOffset(map)
         }
     }
 
@@ -1710,80 +2148,94 @@ private fun OsmdroidLiveMap(
                 setMultiTouchControls(true)
                 controller.setZoom(15.0)
                 clipToPadding = false
+                applyTileProvider(this, mbtilesPath)
+
+                val rotationOverlay = RotationGestureOverlay(this).apply {
+                    isEnabled = true
+                }
+                rotationOverlayRef = rotationOverlay
+                overlays.add(rotationOverlay)
+
+                val compassOverlay = CompassOverlay(context, this).apply {
+                    disableCompass()
+                    isEnabled = false
+                }
+                compassOverlayRef = compassOverlay
+
                 addMapListener(object : MapListener {
                     override fun onScroll(event: ScrollEvent?): Boolean {
-                        refreshUserScreenOffset(this@apply)
+                        mapOrientationDeg = this@apply.mapOrientation
                         return false
                     }
 
                     override fun onZoom(event: ZoomEvent?): Boolean {
-                        refreshUserScreenOffset(this@apply)
+                        mapOrientationDeg = this@apply.mapOrientation
+                        lastUserLocation?.let { point ->
+                            updateLiveLocationRadar(this@apply, point, 0f)
+                            this@apply.postInvalidate()
+                        }
                         return false
                     }
                 })
+
+                setOnTouchListener { _, event ->
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_MOVE,
+                        MotionEvent.ACTION_POINTER_DOWN,
+                        MotionEvent.ACTION_POINTER_UP,
+                        MotionEvent.ACTION_UP,
+                        MotionEvent.ACTION_CANCEL -> {
+                            post {
+                                mapOrientationDeg = this@apply.mapOrientation
+                            }
+                        }
+                    }
+                    false
+                }
+
                 mapViewRef = this
+                onResume()
             }
         },
         update = { map ->
             mapViewRef = map
-            refreshUserScreenOffset(map)
-            // TODO: if mbtilesPath changes, reload tilesource accordingly
+            mapOrientationDeg = map.mapOrientation
+            applyTileProvider(map, mbtilesPath)
 
             // Remove previous selected-road overlays before drawing the latest one
-            map.overlays.removeAll { overlay ->
-                (overlay is Polyline && (overlay.title == "selected_route_polyline_outer" || overlay.title == "selected_route_polyline_inner")) ||
-                (overlay is Marker && overlay.relatedObject == "selected_route_marker") ||
-                (overlay is Marker && overlay.relatedObject == "live_location_marker")
+            if (routePoints.isEmpty()) {
+                removeRouteOverlays(map)
+                lastRenderedRouteSignature = null
             }
+
+            rotationOverlayRef?.let {
+                if (!map.overlays.contains(it)) {
+                    map.overlays.add(it)
+                }
+                it.isEnabled = true
+            }
+
+            compassOverlayRef?.let {
+                it.disableCompass()
+                it.isEnabled = false
+            }
+            mapOrientationDeg = map.mapOrientation
 
 
             if (routePoints.isNotEmpty()) {
-                // routePoints now prefer verified road polyline, otherwise we snap admin anchors / stop points
-                // to roads so the visible line stays smooth and follows the road as closely as possible.
-                if (drawRoadLine) {
-                    val outer = Polyline().apply {
-                        setPoints(routePoints)
-                        title = "selected_route_polyline_outer"
-                        outlinePaint.color = android.graphics.Color.parseColor("#111827")
-                        outlinePaint.strokeWidth = 22f
-                        outlinePaint.isAntiAlias = true
-                        outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-                        outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
-                    }
-                    val inner = Polyline().apply {
-                        setPoints(routePoints)
-                        title = "selected_route_polyline_inner"
-                        outlinePaint.color = android.graphics.Color.parseColor("#2563EB")
-                        outlinePaint.strokeWidth = 12f
-                        outlinePaint.isAntiAlias = true
-                        outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-                        outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
-                    }
-                    map.overlays.add(outer)
-                    map.overlays.add(inner)
-                }
+                val routeSignature = buildRouteRenderSignature(
+                    routePoints = routePoints,
+                    routeStopMarkerPoints = routeStopMarkerPoints,
+                    routeStopMarkerLabels = routeStopMarkerLabels,
+                    drawRoadLine = drawRoadLine
+                )
 
-                val markerCount = minOf(routeStopMarkerPoints.size, routeStopMarkerLabels.size)
-                for (index in 0 until markerCount) {
-                    val point = routeStopMarkerPoints[index]
-                    val label = routeStopMarkerLabels[index].trim().ifBlank {
-                        "Stop ${index + 1}"
-                    }
-
-                    val marker = Marker(map).apply {
-                        position = point
-                        title = label
-                        infoWindow = null
-                        relatedObject = "selected_route_marker"
-                        alpha = 0.98f
-
-                        // custom marker icon
-                        val markerBitmap = createRouteStopMarkerBitmap(ctx, label)
-                        icon = android.graphics.drawable.BitmapDrawable(ctx.resources, markerBitmap)
-                        // pin এর bottom point যেন location এ লাগে
-                        setAnchor(Marker.ANCHOR_CENTER, 0.90f)
-                    }
-                    map.overlays.add(marker)
+                if (lastRenderedRouteSignature != routeSignature) {
+                    updateRoutePolylineOverlays(map, routePoints, drawRoadLine)
+                    updateRouteStopMarkers(map, routeStopMarkerPoints, routeStopMarkerLabels)
+                    sortMapOverlays(map)
+                    map.postInvalidate()
+                    lastRenderedRouteSignature = routeSignature
                 }
 
                 if (!hasFittedRoute) {
@@ -1796,18 +2248,6 @@ private fun OsmdroidLiveMap(
                     }
                     hasFittedRoute = true
                 }
-                // Keep selected route overlays above other overlays
-                map.overlays.sortBy { overlay ->
-                    when {
-                        overlay is Marker && overlay.relatedObject == "live_location_marker" -> 100
-                        overlay is Polygon && overlay.title == "live_location_accuracy_circle" -> 90
-                        overlay is Marker && overlay.relatedObject == "selected_route_marker" -> 50
-                        overlay is Polyline -> 10
-                        else -> 0
-                    }
-                }
-                map.postInvalidate()
-                refreshUserScreenOffset(map)
             }
 
             if (routePoints.isEmpty()) {
@@ -1815,11 +2255,25 @@ private fun OsmdroidLiveMap(
             }
 
             lastUserLocation?.let { userPoint ->
-                val accuracyMeters = lastAccuracyMeters
                 if (enableLiveLocation && !hasCenteredOnUserOnce && latestRoutePoints.isEmpty()) {
                     map.controller.setZoom(17.0)
                     map.controller.animateTo(userPoint)
                     hasCenteredOnUserOnce = true
+                }
+            }
+
+            lastUserLocation?.let { userPoint ->
+                val liveLocationKey = listOf(
+                    userPoint.latitude,
+                    userPoint.longitude,
+                    lastAccuracyMeters,
+                    map.zoomLevelDouble.toFloat().toInt()
+                ).joinToString("#")
+
+                if (lastRenderedLiveLocationKey != liveLocationKey) {
+                    updateLiveLocationMarker(map, userPoint)
+                    updateLiveLocationRadar(map, userPoint, 0f)
+                    lastRenderedLiveLocationKey = liveLocationKey
                 }
             }
 
@@ -1832,59 +2286,203 @@ private fun OsmdroidLiveMap(
             }
             }
         )
-    userScreenOffset?.let { screenOffset ->
-        val pulseBaseSize = 56.dp
-        val dotOuterSize = 18.dp
-        val dotInnerSize = 10.dp
 
-        val pulseSizePx = with(density) { (pulseBaseSize * pulseScale).toPx() }
-        val pulseHalfPx = (pulseSizePx / 2f).toInt()
-        val dotOuterHalfPx = with(density) { (dotOuterSize.toPx() / 2f).toInt() }
-        val dotInnerHalfPx = with(density) { (dotInnerSize.toPx() / 2f).toInt() }
+    DisposableEffect(enableLiveLocation, mapViewRef) {
+        val map = mapViewRef
 
-        Box(
+        if (!enableLiveLocation || map == null) {
+            livePulseAnimator?.cancel()
+            livePulseAnimator = null
+            lastRadarAnimationFrameMs = 0L
+            lastRadarPhaseBucket = -1
+            onDispose { }
+        } else {
+            livePulseAnimator?.cancel()
+
+            val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 1800L
+                repeatCount = ValueAnimator.INFINITE
+                interpolator = LinearInterpolator()
+                addUpdateListener { valueAnimator ->
+                    val phase = valueAnimator.animatedValue as Float
+                    val now = android.os.SystemClock.uptimeMillis()
+                    val phaseBucket = (phase * 18f).toInt()
+                    val shouldRedraw =
+                        (now - lastRadarAnimationFrameMs) >= 33L || phaseBucket != lastRadarPhaseBucket
+
+                    if (!shouldRedraw) return@addUpdateListener
+
+                    lastRadarAnimationFrameMs = now
+                    lastRadarPhaseBucket = phaseBucket
+
+                    lastUserLocation?.let { point ->
+                        updateLiveLocationRadar(map, point, phase)
+                        map.postInvalidate()
+                    }
+                }
+                start()
+            }
+
+            livePulseAnimator = animator
+
+            onDispose {
+                animator.cancel()
+                lastRadarAnimationFrameMs = 0L
+                lastRadarPhaseBucket = -1
+                if (livePulseAnimator === animator) {
+                    livePulseAnimator = null
+                }
+            }
+        }
+    }
+
+    val normalizedMapRotation = ((mapOrientationDeg % 360f) + 360f) % 360f
+    val normalizedHeadingRotation = ((deviceHeadingDeg % 360f) + 360f) % 360f
+    val effectiveCompassRotation = ((normalizedMapRotation + normalizedHeadingRotation) % 360f + 360f) % 360f
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(30f)
+    ) {
+        Surface(
             modifier = Modifier
-                .fillMaxSize()
-                .zIndex(12f)
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(end = 16.dp, top = 124.dp)
+                .size(64.dp)
+                .clickable {
+                    mapViewRef?.let { map ->
+                        map.mapOrientation = 0f
+                        map.controller.animateTo(map.mapCenter)
+                        lastUserLocation?.let { point ->
+                            updateLiveLocationMarker(map, point)
+                            updateLiveLocationRadar(map, point, 0f)
+                        }
+                        map.invalidate()
+                        mapOrientationDeg = 0f
+                    }
+                },
+            shape = RoundedCornerShape(20.dp),
+            color = compassCardColor,
+            tonalElevation = 0.dp,
+            shadowElevation = if (isDark) 0.dp else 8.dp
         ) {
             Box(
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            screenOffset.x - pulseHalfPx,
-                            screenOffset.y - pulseHalfPx
-                        )
-                    }
-                    .size(with(density) { pulseSizePx.toDp() })
-                    .background(
-                        color = Color(0xFF0A84FF).copy(alpha = pulseAlpha),
-                        shape = CircleShape
-                    )
-            )
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "N",
+                    color = compassNorthText,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .offset(y = 2.dp)
+                )
 
-            Box(
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            screenOffset.x - dotOuterHalfPx,
-                            screenOffset.y - dotOuterHalfPx
-                        )
-                    }
-                    .size(dotOuterSize)
-                    .background(Color.White, CircleShape)
-            )
+                Text(
+                    text = "E",
+                    color = compassPrimaryText,
+                    fontSize = 7.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .offset(x = (-4).dp)
+                )
 
-            Box(
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            screenOffset.x - dotInnerHalfPx,
-                            screenOffset.y - dotInnerHalfPx
+                Text(
+                    text = "S",
+                    color = compassPrimaryText,
+                    fontSize = 7.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .offset(y = (-2).dp)
+                )
+
+                Text(
+                    text = "W",
+                    color = compassPrimaryText,
+                    fontSize = 7.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset(x = 4.dp)
+                )
+
+                Box(
+                    modifier = Modifier
+                        .size(26.dp)
+                        .rotate(-effectiveCompassRotation)
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val w = size.width
+                        val h = size.height
+                        val cx = w / 2f
+                        val cy = h / 2f
+                        val r = minOf(w, h) / 2f
+
+                        drawCircle(
+                            color = compassOuterRing,
+                            radius = r * 0.92f,
+                            center = Offset(cx, cy)
                         )
+
+                        drawCircle(
+                            color = Color.White,
+                            radius = r * 0.34f,
+                            center = Offset(cx, cy)
+                        )
+
+                        drawCircle(
+                            color = compassInnerCore,
+                            radius = r * 0.12f,
+                            center = Offset(cx, cy)
+                        )
+
+                        drawCircle(
+                            color = compassAccent,
+                            radius = r * 0.70f,
+                            center = Offset(cx, cy),
+                            style = Stroke(width = r * 0.10f)
+                        )
+
+                        drawLine(
+                            color = compassCrossMajor,
+                            start = Offset(cx, cy - r * 0.75f),
+                            end = Offset(cx, cy + r * 0.75f),
+                            strokeWidth = r * 0.08f,
+                            cap = StrokeCap.Round
+                        )
+
+                        drawLine(
+                            color = compassCrossMinor,
+                            start = Offset(cx - r * 0.75f, cy),
+                            end = Offset(cx + r * 0.75f, cy),
+                            strokeWidth = r * 0.05f,
+                            cap = StrokeCap.Round
+                        )
+
+                        val northPath = Path().apply {
+                            moveTo(cx, cy - r * 0.98f)
+                            lineTo(cx - r * 0.20f, cy - r * 0.02f)
+                            lineTo(cx + r * 0.20f, cy - r * 0.02f)
+                            close()
+                        }
+                        drawPath(northPath, color = compassNorthNeedle)
+
+                        val southPath = Path().apply {
+                            moveTo(cx, cy + r * 0.98f)
+                            lineTo(cx - r * 0.16f, cy + r * 0.10f)
+                            lineTo(cx + r * 0.16f, cy + r * 0.10f)
+                            close()
+                        }
+                        drawPath(southPath, color = compassSouthNeedle)
                     }
-                    .size(dotInnerSize)
-                    .background(Color(0xFF0A84FF), CircleShape)
-            )
+                }
+            }
         }
     }
 
@@ -1896,11 +2494,16 @@ private fun OsmdroidLiveMap(
             locationCallback = null
             lastUserLocation = null
             lastAccuracyMeters = null
-            userScreenOffset = null
+            lastRenderedLiveLocationKey = null
+            lastRadarAnimationFrameMs = 0L
+            lastRadarPhaseBucket = -1
+            livePulseAnimator?.cancel()
+            livePulseAnimator = null
             hasCenteredOnUserOnce = false
             mapViewRef?.let { map ->
                 map.overlays.removeAll { overlay ->
-                    (overlay is Marker && overlay.relatedObject == "live_location_marker")
+                    (overlay is Marker && overlay.relatedObject == "live_location_marker") ||
+                    (overlay is Polygon && overlay.title == "live_location_accuracy_circle")
                 }
                 map.postInvalidate()
             }
@@ -1966,12 +2569,25 @@ private fun OsmdroidLiveMap(
             locationCallback = null
             lastUserLocation = null
             lastAccuracyMeters = null
-            userScreenOffset = null
+            lastRenderedRouteSignature = null
+            lastRenderedLiveLocationKey = null
+            lastRadarAnimationFrameMs = 0L
+            lastRadarPhaseBucket = -1
+            routeStopMarkerBitmapCache.evictAll()
+            liveLocationMarkerBitmapCache.evictAll()
 
             runCatching {
+                compassOverlayRef?.disableCompass()
                 mapViewRef?.overlays?.clear()
+                releaseTileProviderResources()
+                mapViewRef?.onPause()
                 mapViewRef?.onDetach()
             }
+
+            mapOrientationDeg = 0f
+            deviceHeadingDeg = 0f
+            compassOverlayRef = null
+            rotationOverlayRef = null
             mapViewRef = null
         }
     }
