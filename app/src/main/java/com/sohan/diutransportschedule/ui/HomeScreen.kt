@@ -53,6 +53,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -112,44 +116,10 @@ import android.Manifest
 import android.app.PendingIntent
 // --- Notice notification channels ---
 private const val NOTICE_CHANNEL_ID = "admin_notices_v2"
-private const val PREF_FIRESTORE_WINDOW = "firestore_window_limit"
-private const val KEY_FIRESTORE_WINDOW_DATE = "window_date"
-private const val KEY_FIRESTORE_WINDOW_SLOT = "window_slot"
 private const val PREF_FIRST_INSTALL_SYNC = "first_install_sync"
 private const val KEY_FIRST_INSTALL_SYNC_DONE = "first_install_sync_done"
 
-private fun currentFirestoreWindowSlot(): Int {
-    val hour = LocalTime.now().hour
-    return when {
-        hour in 5..11 -> 1   // Morning
-        hour in 12..16 -> 2  // Noon
-        hour in 17..23 -> 3  // Evening
-        else -> 0            // Night: no read
-    }
-}
 
-private fun canUseFirestoreWindow(context: Context): Boolean {
-    val slot = currentFirestoreWindowSlot()
-    if (slot == 0) return false
-
-    val prefs = context.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
-    val today = LocalDate.now().toString()
-    val savedDate = prefs.getString(KEY_FIRESTORE_WINDOW_DATE, "") ?: ""
-    val savedSlot = prefs.getInt(KEY_FIRESTORE_WINDOW_SLOT, -1)
-
-    return !(savedDate == today && savedSlot == slot)
-}
-
-private fun markFirestoreWindowUsed(context: Context) {
-    val slot = currentFirestoreWindowSlot()
-    if (slot == 0) return
-
-    context.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
-        .edit()
-        .putString(KEY_FIRESTORE_WINDOW_DATE, LocalDate.now().toString())
-        .putInt(KEY_FIRESTORE_WINDOW_SLOT, slot)
-        .apply()
-}
 
 private fun isFirstInstallSyncDone(context: Context): Boolean {
     return context.getSharedPreferences(PREF_FIRST_INSTALL_SYNC, Context.MODE_PRIVATE)
@@ -166,7 +136,7 @@ private fun markFirstInstallSyncDone(context: Context) {
 // import androidx.compose.foundation.isSystemInDarkTheme
 /* ------------------ ENTRY (PUBLIC) ------------------ */
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class)
 @Composable
 
 
@@ -184,6 +154,7 @@ fun HomeScreen(
 
     val showUpdate by vm.showUpdate.collectAsState()
     val updateMessage by vm.updateMessage.collectAsState()
+    val syncStatusMessage by vm.syncStatusMessage.collectAsState()
 
     var query by rememberSaveable { mutableStateOf("") }
 
@@ -240,11 +211,20 @@ fun HomeScreen(
             homeInitialRefreshDone = true
 
             if (!isFirstInstallSyncDone(ctx)) {
-                vm.refresh(showBannerIfUpdated = true, allowDataRead = true)
+                vm.refresh(
+                    showBannerIfUpdated = true,
+                    allowDataRead = true,
+                    context = ctx,
+                    enforceManualReadInterval = false
+                )
                 markFirstInstallSyncDone(ctx)
-            } else if (canUseFirestoreWindow(ctx)) {
-                markFirestoreWindowUsed(ctx)
-                vm.refresh(showBannerIfUpdated = true, allowDataRead = true)
+            } else {
+                vm.refresh(
+                    showBannerIfUpdated = true,
+                    allowDataRead = true,
+                    context = ctx,
+                    enforceManualReadInterval = false
+                )
             }
         }
     }
@@ -271,6 +251,17 @@ fun HomeScreen(
     }
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+    val pullRefreshState = rememberPullRefreshState(
+        refreshing = syncing,
+        onRefresh = {
+            vm.refresh(
+                showBannerIfUpdated = true,
+                allowDataRead = true,
+                context = ctx,
+                enforceManualReadInterval = true
+            )
+        }
+    )
 
     // Expanded state per card
     val expandedIds = rememberSaveable { mutableStateOf(setOf<String>()) }
@@ -285,6 +276,7 @@ fun HomeScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .pullRefresh(pullRefreshState)
     ) {
         Column(
             modifier = Modifier
@@ -311,6 +303,15 @@ fun HomeScreen(
                         onOk = { vm.dismissUpdate() },
                         appDark = appDark,
                         onOpen = { showUpdateOverlay = true }
+                    )
+                }
+
+                if (syncStatusMessage.isNotBlank()) {
+                    UpdateBanner(
+                        message = syncStatusMessage,
+                        onOk = { vm.dismissSyncStatus() },
+                        appDark = appDark,
+                        onOpen = { }
                     )
                 }
             }
@@ -356,6 +357,12 @@ fun HomeScreen(
                 }
             }
         }
+
+        PullRefreshIndicator(
+            refreshing = syncing,
+            state = pullRefreshState,
+            modifier = Modifier.align(Alignment.TopCenter)
+        )
 
         if (showUpdateOverlay && updateMessage.isNotBlank()) {
             FullUpdateOverlay(

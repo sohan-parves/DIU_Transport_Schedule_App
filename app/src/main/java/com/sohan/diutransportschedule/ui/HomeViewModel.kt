@@ -1,5 +1,10 @@
 package com.sohan.diutransportschedule.ui
 
+import android.content.Context
+import android.content.SharedPreferences
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sohan.diutransportschedule.db.DbScheduleItem
@@ -10,6 +15,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.sohan.diutransportschedule.BuildConfig
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+
 data class UiSchedule(
     val routeNo: String,
     val routeName: String,
@@ -24,6 +33,10 @@ data class RouteOption(
     val routeNo: String,
     val label: String
 )
+
+private const val PREF_FIRESTORE_WINDOW = "firestore_window_limit"
+private const val KEY_FIRESTORE_WINDOW_DATE = "window_date"
+private const val KEY_FIRESTORE_WINDOW_SLOT = "window_slot"
 
 private fun DbScheduleItem.toUi(): UiSchedule = UiSchedule(
     routeNo = routeNo,
@@ -49,9 +62,13 @@ class HomeViewModel(
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
-    // 🔒 Throttle sync calls to reduce unnecessary Firestore reads
+    // Manual remote read window: allow only once every 1 hour for swipe-to-refresh.
+    // Auto refresh uses separate slot-based state and does not share this timestamp.
     private var lastSyncAtMillis: Long = 0L
-    private val minSyncIntervalMillis = 5 * 60 * 1000L // 5 minutes
+    private var manualLastRemoteReadAtMillis: Long = 0L
+    private val manualRemoteReadIntervalMillis = 60 * 60 * 1000L // 1 hour
+    private val syncMutex = Mutex()
+
     // 🔒 Daily sync cap (extra protection against excessive reads)
     private var syncCountToday: Int = 0
     private var syncDayStamp: String = java.time.LocalDate.now().toString()
@@ -70,11 +87,59 @@ class HomeViewModel(
         syncCountToday++
     }
 
+    private fun currentFirestoreWindowSlot(): Int {
+        val hour = java.time.LocalTime.now().hour
+        return when {
+            hour in 5..11 -> 1   // Morning
+            hour in 12..16 -> 2  // Noon
+            hour in 17..23 -> 3  // Evening
+            else -> 0            // Night: no read
+        }
+    }
+
+    private fun firestoreWindowPrefs(context: Context?): SharedPreferences? {
+        return context?.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
+    }
+
+
+    private fun readAutoLastSlot(context: Context?): Pair<String, Int> {
+        val prefs = firestoreWindowPrefs(context)
+        val date = prefs?.getString(KEY_FIRESTORE_WINDOW_DATE, "") ?: ""
+        val slot = prefs?.getInt(KEY_FIRESTORE_WINDOW_SLOT, -1) ?: -1
+        return date to slot
+    }
+
+    private fun isAutoSlotAvailable(context: Context?): Boolean {
+        val slot = currentFirestoreWindowSlot()
+        if (slot == 0) return false
+
+        val today = java.time.LocalDate.now().toString()
+        val (savedDate, savedSlot) = readAutoLastSlot(context)
+        return !(savedDate == today && savedSlot == slot)
+    }
+
+    private fun currentAutoReadableSlotOrNone(): Int {
+        return currentFirestoreWindowSlot()
+    }
+
+    private fun markAutoSlotRead(context: Context?, slot: Int) {
+        if (slot == 0) return
+
+        val prefs = firestoreWindowPrefs(context) ?: return
+        prefs.edit()
+            .putString(KEY_FIRESTORE_WINDOW_DATE, java.time.LocalDate.now().toString())
+            .putInt(KEY_FIRESTORE_WINDOW_SLOT, slot)
+            .apply()
+    }
+
     private val _showUpdate = MutableStateFlow(false)
     val showUpdate: StateFlow<Boolean> = _showUpdate.asStateFlow()
 
     private val _updateMessage = MutableStateFlow("")
     val updateMessage: StateFlow<String> = _updateMessage.asStateFlow()
+
+    private val _syncStatusMessage = MutableStateFlow("")
+    val syncStatusMessage: StateFlow<String> = _syncStatusMessage.asStateFlow()
 
 
     // prefs
@@ -203,48 +268,87 @@ class HomeViewModel(
         _showUpdate.value = false
     }
 
-    fun sync() {
-        viewModelScope.launch {
-            if (_isSyncing.value) return@launch
-            val now = System.currentTimeMillis()
-            if (now - lastSyncAtMillis < minSyncIntervalMillis) {
-                return@launch
-            }
-            if (!canSyncToday()) {
-                return@launch
-            }
-            _isSyncing.value = true
-            try {
-                val res = repo.syncIfNeeded()
-                if (res.message.isNotBlank()) _updateMessage.value = res.message
-
-                if (showUpdateBanner.value && res.updated && repo.shouldShowUpdate(res.version)) {
-                    _showUpdate.value = true
-                    repo.markSeen(res.version)
-                }
-            } catch (_: Throwable) {
-            } finally {
-                lastSyncAtMillis = System.currentTimeMillis()
-                markSyncDone()
-                _isSyncing.value = false
-            }
-        }
+    fun dismissSyncStatus() {
+        _syncStatusMessage.value = ""
     }
 
-    fun refresh(showBannerIfUpdated: Boolean = true, allowDataRead: Boolean = true) {
-        viewModelScope.launch {
-            if (_isSyncing.value) return@launch
+    private fun hasInternetConnection(context: Context?): Boolean {
+        if (context == null) return false
+
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        val network = cm.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(network) ?: return false
+
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    private suspend fun performRefresh(
+        showBannerIfUpdated: Boolean,
+        allowDataRead: Boolean,
+        context: Context?,
+        enforceManualReadInterval: Boolean,
+        isManualRefresh: Boolean
+    ) {
+        syncMutex.withLock {
+            if (_isSyncing.value) return
+            _syncStatusMessage.value = ""
+
             val now = System.currentTimeMillis()
-            if (now - lastSyncAtMillis < minSyncIntervalMillis) {
-                // Too soon since last sync → skip to avoid extra reads
-                return@launch
+            val hasInternet = withContext(Dispatchers.IO) {
+                withTimeoutOrNull(4_000L) {
+                    hasInternetConnection(context)
+                } ?: false
             }
+            val currentAutoSlot = currentAutoReadableSlotOrNone()
+            val manualWithinReadInterval =
+                now - manualLastRemoteReadAtMillis >= manualRemoteReadIntervalMillis
+            val manualRemoteAllowed = hasInternet && manualWithinReadInterval
+            val autoRemoteAllowed = hasInternet && currentAutoSlot != 0 && isAutoSlotAvailable(context)
+            val allowRemoteRead = allowDataRead && if (isManualRefresh) {
+                manualRemoteAllowed
+            } else {
+                autoRemoteAllowed
+            }
+
+            if (allowDataRead && !hasInternet) {
+                if (isManualRefresh && _isSyncing.value) {
+                    _syncStatusMessage.value = "Internet connection failed"
+                }
+                return
+            }
+
             if (!canSyncToday()) {
-                return@launch
+                return
             }
+
             _isSyncing.value = true
+            var remoteReadSucceeded = false
+            val autoSlotUsedForThisAttempt = currentAutoReadableSlotOrNone()
+
             try {
-                val res = repo.syncIfNeeded(allowDataRead = allowDataRead)
+                val res = if (allowRemoteRead) {
+                    withContext(Dispatchers.IO) {
+                        withTimeoutOrNull(4_000L) {
+                            repo.syncIfNeeded(allowDataRead = true)
+                        }
+                    } ?: run {
+                        if (isManualRefresh && _isSyncing.value) {
+                            _syncStatusMessage.value = "Internet connection failed"
+                        }
+                        return@withLock
+                    }
+                } else {
+                    withContext(Dispatchers.IO) {
+                        repo.syncIfNeeded(allowDataRead = false)
+                    }
+                }
+
+                if (allowRemoteRead) {
+                    remoteReadSucceeded = true
+                }
+
                 if (res.message.isNotBlank()) _updateMessage.value = res.message
 
                 if (showBannerIfUpdated && showUpdateBanner.value &&
@@ -254,11 +358,50 @@ class HomeViewModel(
                     repo.markSeen(res.version)
                 }
             } catch (_: Throwable) {
+                if (isManualRefresh && _isSyncing.value) {
+                    _syncStatusMessage.value = "Internet connection failed"
+                }
             } finally {
                 lastSyncAtMillis = System.currentTimeMillis()
+                if (remoteReadSucceeded) {
+                    if (isManualRefresh) {
+                        manualLastRemoteReadAtMillis = lastSyncAtMillis
+                    } else {
+                        markAutoSlotRead(context, autoSlotUsedForThisAttempt)
+                    }
+                }
                 markSyncDone()
                 _isSyncing.value = false
             }
+        }
+    }
+
+    fun sync(context: Context? = null) {
+        viewModelScope.launch {
+            performRefresh(
+                showBannerIfUpdated = true,
+                allowDataRead = true,
+                context = context,
+                enforceManualReadInterval = false,
+                isManualRefresh = false
+            )
+        }
+    }
+
+    fun refresh(
+        showBannerIfUpdated: Boolean = true,
+        allowDataRead: Boolean = true,
+        context: Context? = null,
+        enforceManualReadInterval: Boolean = false
+    ) {
+        viewModelScope.launch {
+            performRefresh(
+                showBannerIfUpdated = showBannerIfUpdated,
+                allowDataRead = allowDataRead,
+                context = context,
+                enforceManualReadInterval = enforceManualReadInterval,
+                isManualRefresh = enforceManualReadInterval
+            )
         }
     }
 
