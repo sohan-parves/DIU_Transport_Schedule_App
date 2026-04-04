@@ -6,7 +6,9 @@ import com.sohan.diutransportschedule.db.JsonConverters
 import com.sohan.diutransportschedule.db.ScheduleDao
 import com.sohan.diutransportschedule.prefs.UserPrefs
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.tasks.await
+
 
 data class SyncResult(
     val updated: Boolean,
@@ -22,6 +24,53 @@ class ScheduleRepository(
 ) {
 
     fun observeLocal() = dao.observeAll()
+
+    suspend fun needsVersionRefresh(): Boolean {
+        return try {
+            val remote = remoteMetaVersion()
+            val local = localMetaVersion()
+            remote > 0 && remote != local
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    suspend fun hasReadableLocalData(): Boolean {
+        return try {
+            observeLocal().first().any { entity ->
+                val routeNo = entity.routeNo.trim()
+                val looksLikeRouteNo = Regex("^[A-Za-z]+\\d+$").matches(routeNo)
+                val hasAnyTime =
+                    JsonConverters.jsonToList(entity.startTimesJson).any { it.trim().isNotBlank() } ||
+                            JsonConverters.jsonToList(entity.departureTimesJson).any { it.trim().isNotBlank() }
+
+                looksLikeRouteNo && hasAnyTime
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private suspend fun readRemoteMeta(): SyncResult {
+        val meta = fs.collection("meta").document("app").get().await()
+        val remoteVersion = (
+                meta.getLong("scheduleVersion")
+                    ?: meta.getLong("version")
+                    ?: 0L
+                ).toInt()
+        val message = meta.getString("message") ?: ""
+        return SyncResult(updated = false, version = remoteVersion, message = message)
+    }
+
+    private suspend fun remoteMetaVersion(): Int = readRemoteMeta().version
+
+    private suspend fun localMetaVersion(): Int {
+        return try {
+            store.getLocalVersion()
+        } catch (_: Throwable) {
+            0
+        }
+    }
 
     // ---------------- Preferences (Expose from UserPrefs) ----------------
 
@@ -49,25 +98,40 @@ class ScheduleRepository(
 
     // ---------------- Sync ----------------
 
-    suspend fun syncIfNeeded(allowDataRead: Boolean = true): SyncResult {
-        val meta = fs.collection("meta").document("app").get().await()
-        val remoteVersion = (
-                meta.getLong("scheduleVersion")
-                    ?: meta.getLong("version")
-                    ?: 0L
-                ).toInt()
-        val message = meta.getString("message") ?: ""
+    suspend fun syncIfNeeded(
+        allowDataRead: Boolean = true,
+        forceReadOnVersionChange: Boolean = false,
+        forceMetaCheckOnly: Boolean = false
+    ): SyncResult {
+        val meta = readRemoteMeta()
+        val remoteVersion = meta.version
+        val message = meta.message
 
         val localVersion = store.getLocalVersion()
         val updated = remoteVersion > localVersion
+        val hasLocalData = hasReadableLocalData()
 
-        // ✅ READ OPTIMIZATION:
-        // If version hasn't changed and we already have a local version, do NOT re-read the schedule doc.
-        // This keeps returning-user opens at ~1 read (meta/app only).
-        if (!updated && localVersion > 0) {
+        // Slot/hour remote checks should stop at meta/version when Room already has data
+        // and no version change requires a full schedule reload.
+        if (forceMetaCheckOnly && hasLocalData && !updated) {
             return SyncResult(updated = false, version = remoteVersion, message = message)
         }
-        if (!allowDataRead) {
+
+        // If version is unchanged and Room already has readable data,
+        // only use the meta/version check and keep serving Room data.
+        if (!updated && hasLocalData) {
+            return SyncResult(updated = false, version = remoteVersion, message = message)
+        }
+
+        // When Room is empty, allow a full read even if version is the same,
+        // so local cache can be rebuilt.
+        val shouldReadFullData = when {
+            !hasLocalData -> allowDataRead
+            updated && forceReadOnVersionChange -> true
+            else -> allowDataRead && updated
+        }
+
+        if (!shouldReadFullData) {
             return SyncResult(updated = false, version = remoteVersion, message = message)
         }
 

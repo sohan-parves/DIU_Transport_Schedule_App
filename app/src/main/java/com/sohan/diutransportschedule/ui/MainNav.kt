@@ -31,13 +31,19 @@ fun MainNav(
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route ?: "home"
 
+    fun navigateInstant(route: String) {
+        if (currentRoute == route) return
+        nav.navigate(route) {
+            launchSingleTop = true
+            popUpTo(nav.graph.startDestinationId) {
+                inclusive = false
+            }
+        }
+    }
+
     LaunchedEffect(openNotice) {
         if (openNotice) {
-            nav.navigate("notice") {
-                launchSingleTop = true
-                restoreState = true
-                popUpTo(nav.graph.startDestinationId) { saveState = true }
-            }
+            navigateInstant("notice")
             onNoticeOpened()
         }
     }
@@ -60,11 +66,7 @@ fun MainNav(
                         BottomTab.NOTICE -> "notice"
                         BottomTab.PROFILE -> "profile"
                     }
-                    nav.navigate(route) {
-                        launchSingleTop = true
-                        restoreState = true
-                        popUpTo(nav.graph.startDestinationId) { saveState = true }
-                    }
+                    navigateInstant(route)
                 }
             )
         }

@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sohan.diutransportschedule.db.DbScheduleItem
@@ -46,13 +45,24 @@ private fun DbScheduleItem.toUi(): UiSchedule = UiSchedule(
     departureTimes = JsonConverters.jsonToList(departureTimesJson),
     appliesOn = if (routeNo.trim().startsWith("F", ignoreCase = true)) "FRIDAY" else "DAILY"
 )
-class HomeViewModel(
-    private val repo: ScheduleRepository
-) : ViewModel() {
 
-    init {
-        viewModelScope.launch { repo.ensureDefaultPrefs() }
+private fun latestOptionsContainSelectedRoute(
+    selectedRoute: String,
+    routeOptions: List<RouteOption>
+): Boolean {
+    val normalized = selectedRoute.trim()
+    if (normalized.isBlank()) return false
+    if (normalized.equals("ALL", ignoreCase = true)) return true
+
+    return routeOptions.any { option ->
+        option.routeNo.trim().equals(normalized, ignoreCase = true)
     }
+}
+
+class HomeViewModel(
+    private val repo: ScheduleRepository,
+    private val initialDarkModePref: Boolean = true
+) : ViewModel() {
 
     // Current installed app version (from app/build.gradle)
     val currentAppVersionName: String = BuildConfig.VERSION_NAME
@@ -64,28 +74,10 @@ class HomeViewModel(
 
     // Manual remote read window: allow only once every 1 hour for swipe-to-refresh.
     // Auto refresh uses separate slot-based state and does not share this timestamp.
-    private var lastSyncAtMillis: Long = 0L
     private var manualLastRemoteReadAtMillis: Long = 0L
     private val manualRemoteReadIntervalMillis = 60 * 60 * 1000L // 1 hour
     private val syncMutex = Mutex()
 
-    // 🔒 Daily sync cap (extra protection against excessive reads)
-    private var syncCountToday: Int = 0
-    private var syncDayStamp: String = java.time.LocalDate.now().toString()
-    private val maxSyncsPerDay = 30
-
-    private fun canSyncToday(): Boolean {
-        val today = java.time.LocalDate.now().toString()
-        if (today != syncDayStamp) {
-            syncDayStamp = today
-            syncCountToday = 0
-        }
-        return syncCountToday < maxSyncsPerDay
-    }
-
-    private fun markSyncDone() {
-        syncCountToday++
-    }
 
     private fun currentFirestoreWindowSlot(): Int {
         val hour = java.time.LocalTime.now().hour
@@ -141,13 +133,17 @@ class HomeViewModel(
     private val _syncStatusMessage = MutableStateFlow("")
     val syncStatusMessage: StateFlow<String> = _syncStatusMessage.asStateFlow()
 
+    private val _initialUiReady = MutableStateFlow(false)
+    val initialUiReady: StateFlow<Boolean> = _initialUiReady.asStateFlow()
+
 
     // prefs
     val selectedRoute: StateFlow<String> = repo.selectedRouteFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "ALL")
 
+
     val darkMode: StateFlow<Boolean> = repo.darkModeFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), initialDarkModePref)
 
     val showUpdateBanner: StateFlow<Boolean> = repo.showUpdateBannerFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
@@ -175,6 +171,8 @@ class HomeViewModel(
                     looksLikeRouteNo && hasAnyTime
                 }
         }
+
+
 
     // ✅ Profile dropdown: routeNo + routeName label
     val routeOptions: StateFlow<List<RouteOption>> = localUi
@@ -205,6 +203,30 @@ class HomeViewModel(
         opts.firstOrNull { it.routeNo.equals(sel, ignoreCase = true) }?.label ?: sel
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "All Routes")
 
+    init {
+        viewModelScope.launch { repo.ensureDefaultPrefs() }
+
+        viewModelScope.launch {
+            routeOptions.collect { options ->
+                val currentSelectedRoute = selectedRoute.value.trim()
+
+                when {
+                    options.isEmpty() -> {
+                        // Keep the user's current selection during transient sync/replace states.
+                    }
+
+                    latestOptionsContainSelectedRoute(currentSelectedRoute, options) -> {
+                        // Keep the user's existing route selection unchanged.
+                    }
+
+                    else -> {
+                        repo.setSelectedRoute("ALL")
+                    }
+                }
+            }
+        }
+    }
+
     // ✅ Home items: Search overrides Profile route filter
     val items: StateFlow<List<UiSchedule>> =
         combine(localUi, selectedRoute, query) { list, route, q ->
@@ -228,18 +250,16 @@ class HomeViewModel(
 
                 // FILTERED (route selected): apply day rule
                 else -> {
-                    val dayFiltered = if (todayIsFriday) {
-                        list.filter { it.appliesOn == "FRIDAY" }
+                    val routeFiltered = if (route.equals("ALL", ignoreCase = true)) {
+                        list
                     } else {
-                        list.filter { it.appliesOn != "FRIDAY" }
+                        list.filter { it.routeNo.equals(route, ignoreCase = true) }
                     }
 
-                    // ✅ Friday override: if a specific route is selected (not ALL), still show Friday schedules.
                     if (todayIsFriday) {
-                        dayFiltered
+                        routeFiltered.filter { it.appliesOn == "FRIDAY" }
                     } else {
-                        if (route.equals("ALL", ignoreCase = true)) dayFiltered
-                        else dayFiltered.filter { it.routeNo.equals(route, ignoreCase = true) }
+                        routeFiltered.filter { it.appliesOn != "FRIDAY" }
                     }
                 }
             }
@@ -288,16 +308,26 @@ class HomeViewModel(
         showBannerIfUpdated: Boolean,
         allowDataRead: Boolean,
         context: Context?,
-        enforceManualReadInterval: Boolean,
         isManualRefresh: Boolean
     ) {
         syncMutex.withLock {
             if (_isSyncing.value) return
             _syncStatusMessage.value = ""
 
+            val isAutoRefresh = !isManualRefresh
+
+            val hasLocalData = try {
+                repo.hasReadableLocalData()
+            } catch (_: Throwable) {
+                false
+            }
+            if (hasLocalData) {
+                _initialUiReady.value = true
+            }
+
             val now = System.currentTimeMillis()
             val hasInternet = withContext(Dispatchers.IO) {
-                withTimeoutOrNull(4_000L) {
+                withTimeoutOrNull(if (hasLocalData) 900L else 1500L) {
                     hasInternetConnection(context)
                 } ?: false
             }
@@ -305,48 +335,57 @@ class HomeViewModel(
             val manualWithinReadInterval =
                 now - manualLastRemoteReadAtMillis >= manualRemoteReadIntervalMillis
             val manualRemoteAllowed = hasInternet && manualWithinReadInterval
-            val autoRemoteAllowed = hasInternet && currentAutoSlot != 0 && isAutoSlotAvailable(context)
-            val allowRemoteRead = allowDataRead && if (isManualRefresh) {
-                manualRemoteAllowed
-            } else {
-                autoRemoteAllowed
+
+            val autoSlotAvailable = hasInternet && currentAutoSlot != 0 && isAutoSlotAvailable(context)
+            val shouldCheckRemoteForAuto = isAutoRefresh && allowDataRead && autoSlotAvailable
+
+            val autoRemoteAllowed = shouldCheckRemoteForAuto
+
+            val allowRemoteRead = allowDataRead && when {
+                isManualRefresh -> manualRemoteAllowed
+                else -> autoRemoteAllowed
             }
 
-            if (allowDataRead && !hasInternet) {
-                if (isManualRefresh && _isSyncing.value) {
-                    _syncStatusMessage.value = "Internet connection failed"
-                }
-                return
-            }
-
-            if (!canSyncToday()) {
-                return
-            }
 
             _isSyncing.value = true
             var remoteReadSucceeded = false
-            val autoSlotUsedForThisAttempt = currentAutoReadableSlotOrNone()
+
+            val autoSlotUsedForThisAttempt = currentAutoSlot
 
             try {
-                val res = if (allowRemoteRead) {
-                    withContext(Dispatchers.IO) {
-                        withTimeoutOrNull(4_000L) {
-                            repo.syncIfNeeded(allowDataRead = true)
-                        }
-                    } ?: run {
-                        if (isManualRefresh && _isSyncing.value) {
-                            _syncStatusMessage.value = "Internet connection failed"
-                        }
-                        return@withLock
-                    }
-                } else {
-                    withContext(Dispatchers.IO) {
+                val res = withContext(Dispatchers.IO) {
+                    if (!allowRemoteRead) {
                         repo.syncIfNeeded(allowDataRead = false)
+                    } else {
+                        withTimeoutOrNull(4_000L) {
+                            repo.syncIfNeeded(
+                                allowDataRead = !hasLocalData,
+                                forceReadOnVersionChange = true,
+                                forceMetaCheckOnly = hasLocalData
+                            )
+                        }
                     }
+                } ?: run {
+                    if (isManualRefresh && _isSyncing.value) {
+                        _syncStatusMessage.value = "Internet connection failed"
+                    }
+                    return@withLock
                 }
 
                 if (allowRemoteRead) {
                     remoteReadSucceeded = true
+
+                    if (!hasLocalData) {
+                        val localReadyNow = try {
+                            repo.hasReadableLocalData()
+                        } catch (_: Throwable) {
+                            false
+                        }
+
+                        if (isManualRefresh && !localReadyNow) {
+                            _syncStatusMessage.value = "Schedule data is still loading"
+                        }
+                    }
                 }
 
                 if (res.message.isNotBlank()) _updateMessage.value = res.message
@@ -362,15 +401,16 @@ class HomeViewModel(
                     _syncStatusMessage.value = "Internet connection failed"
                 }
             } finally {
-                lastSyncAtMillis = System.currentTimeMillis()
+
                 if (remoteReadSucceeded) {
+                    val completedAt = System.currentTimeMillis()
                     if (isManualRefresh) {
-                        manualLastRemoteReadAtMillis = lastSyncAtMillis
-                    } else {
+                        manualLastRemoteReadAtMillis = completedAt
+                    } else if (autoSlotUsedForThisAttempt != 0) {
                         markAutoSlotRead(context, autoSlotUsedForThisAttempt)
                     }
                 }
-                markSyncDone()
+                _initialUiReady.value = true
                 _isSyncing.value = false
             }
         }
@@ -382,7 +422,6 @@ class HomeViewModel(
                 showBannerIfUpdated = true,
                 allowDataRead = true,
                 context = context,
-                enforceManualReadInterval = false,
                 isManualRefresh = false
             )
         }
@@ -392,15 +431,34 @@ class HomeViewModel(
         showBannerIfUpdated: Boolean = true,
         allowDataRead: Boolean = true,
         context: Context? = null,
-        enforceManualReadInterval: Boolean = false
+        isManualRefresh: Boolean = false
     ) {
         viewModelScope.launch {
+            val hasLocalDataBeforeRefresh = try {
+                repo.hasReadableLocalData()
+            } catch (_: Throwable) {
+                false
+            }
+
+            if (hasLocalDataBeforeRefresh) {
+                _initialUiReady.value = true
+            }
+            else {
+                val cachedItemsNow = try {
+                    items.value.isNotEmpty()
+                } catch (_: Throwable) {
+                    false
+                }
+                if (cachedItemsNow) {
+                    _initialUiReady.value = true
+                }
+            }
+
             performRefresh(
                 showBannerIfUpdated = showBannerIfUpdated,
                 allowDataRead = allowDataRead,
                 context = context,
-                enforceManualReadInterval = enforceManualReadInterval,
-                isManualRefresh = enforceManualReadInterval
+                isManualRefresh = isManualRefresh
             )
         }
     }
@@ -456,12 +514,12 @@ class HomeViewModel(
         enabled: Boolean,
         leadMinutes: Int
     ) {
-        // ✅ Friday: keep notifications OFF
         val todayIsFriday = try {
             java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
         } catch (_: Throwable) {
             false
         }
+
         if (todayIsFriday) {
             RouteNotificationScheduler.cancelAll(context)
             return
@@ -472,21 +530,28 @@ class HomeViewModel(
             return
         }
 
-        val item = currentItems.firstOrNull { it.routeNo.equals(selectedRoute, ignoreCase = true) }
-        if (item == null) {
+        val routeItems = currentItems.filter { it.routeNo.equals(selectedRoute, ignoreCase = true) }
+
+        if (routeItems.isEmpty()) {
             RouteNotificationScheduler.cancelAll(context)
             return
         }
 
-        RouteNotificationScheduler.scheduleForRoute(
-            context = context,
-            routeNo = item.routeNo,
-            routeName = item.routeName,
-            startTimes = item.startTimes,
-            departureTimes = item.departureTimes,
-            leadMinutes = leadMinutes,
-            appliesOn = item.appliesOn
-        )
+        // আগে পুরানো alarm clear
+        RouteNotificationScheduler.cancelAll(context)
+
+        // এখন selected route-এর সব matching item schedule
+        routeItems.forEach { item ->
+            RouteNotificationScheduler.scheduleForRoute(
+                context = context,
+                routeNo = item.routeNo,
+                routeName = item.routeName,
+                startTimes = item.startTimes,
+                departureTimes = item.departureTimes,
+                leadMinutes = leadMinutes,
+                appliesOn = item.appliesOn
+            )
+        }
     }
 }
 
@@ -494,6 +559,10 @@ class HomeViewModel(
 
 private object RouteNotificationScheduler {
     private const val CHANNEL_ID = "route_notifications"
+    private const val PREFS_NAME = "route_notification_scheduler"
+    private const val KEY_SCHEDULED_CODES = "scheduled_request_codes"
+    private const val NOTIF_PREFS_NAME = "route_notification_ids"
+    private const val KEY_NOTIF_IDS = "route_notification_ids"
 
     fun ensureChannel(context: android.content.Context) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
@@ -512,7 +581,84 @@ private object RouteNotificationScheduler {
     }
 
     fun cancelAll(context: android.content.Context) {
-        androidx.core.app.NotificationManagerCompat.from(context).cancelAll()
+        val nm = androidx.core.app.NotificationManagerCompat.from(context)
+        val notifPrefs = context.getSharedPreferences(NOTIF_PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val notifRaw = notifPrefs.getString(KEY_NOTIF_IDS, "").orEmpty()
+
+        notifRaw.split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .distinct()
+            .forEach { notificationId ->
+                try {
+                    nm.cancel(notificationId)
+                } catch (_: Throwable) {
+                }
+            }
+
+        notifPrefs.edit().remove(KEY_NOTIF_IDS).apply()
+
+        val am = context.getSystemService(android.content.Context.ALARM_SERVICE) as android.app.AlarmManager
+        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_SCHEDULED_CODES, "").orEmpty()
+
+        raw.split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .distinct()
+            .forEach { requestCode ->
+                val intent = android.content.Intent(context, RouteAlarmReceiver::class.java).apply {
+                    action = "ROUTE_ALARM"
+                }
+
+                val pi = android.app.PendingIntent.getBroadcast(
+                    context,
+                    requestCode,
+                    intent,
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                            (if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
+                                android.app.PendingIntent.FLAG_IMMUTABLE else 0)
+                )
+
+                try {
+                    am.cancel(pi)
+                    pi.cancel()
+                } catch (_: Throwable) {
+                }
+            }
+
+        prefs.edit().remove(KEY_SCHEDULED_CODES).apply()
+    }
+    fun rememberNotificationId(
+        context: android.content.Context,
+        notificationId: Int
+    ) {
+        val prefs = context.getSharedPreferences(NOTIF_PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val existing = prefs.getString(KEY_NOTIF_IDS, "").orEmpty()
+            .split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .toMutableSet()
+
+        existing.add(notificationId)
+
+        prefs.edit()
+            .putString(KEY_NOTIF_IDS, existing.sorted().joinToString(","))
+            .apply()
+    }
+
+    private fun rememberScheduledRequestCode(
+        context: android.content.Context,
+        requestCode: Int
+    ) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val existing = prefs.getString(KEY_SCHEDULED_CODES, "").orEmpty()
+            .split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .toMutableSet()
+
+        existing.add(requestCode)
+
+        prefs.edit()
+            .putString(KEY_SCHEDULED_CODES, existing.sorted().joinToString(","))
+            .apply()
     }
 
     fun scheduleForRoute(
@@ -578,6 +724,8 @@ private object RouteNotificationScheduler {
                 intent,
                 android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
             )
+
+            rememberScheduledRequestCode(context, requestCode)
 
             val triggerAtMillis = fireAt.toInstant().toEpochMilli()
             when {
@@ -651,6 +799,7 @@ class RouteAlarmReceiver : android.content.BroadcastReceiver() {
             }
         }
 
+        val notificationId = (routeNo + kind + timeText).hashCode()
         val notif = androidx.core.app.NotificationCompat.Builder(context, "route_notifications")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             // TIME is the primary headline
@@ -666,10 +815,15 @@ class RouteAlarmReceiver : android.content.BroadcastReceiver() {
             )
             .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
             .setCategory(androidx.core.app.NotificationCompat.CATEGORY_REMINDER)
-            .setAutoCancel(true)
+            .setAutoCancel(false)
             .build()
 
         androidx.core.app.NotificationManagerCompat.from(context)
-            .notify((routeNo + kind + timeText).hashCode(), notif)
+            .notify(notificationId, notif)
+
+        try {
+            RouteNotificationScheduler.rememberNotificationId(context, notificationId)
+        } catch (_: Throwable) {
+        }
     }
 }

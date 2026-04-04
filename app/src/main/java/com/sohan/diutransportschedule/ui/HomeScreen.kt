@@ -114,6 +114,15 @@ import android.content.pm.PackageManager
 import android.content.SharedPreferences
 import android.Manifest
 import android.app.PendingIntent
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.geometry.Offset
+
 // --- Notice notification channels ---
 private const val NOTICE_CHANNEL_ID = "admin_notices_v2"
 private const val PREF_FIRST_INSTALL_SYNC = "first_install_sync"
@@ -215,7 +224,7 @@ fun HomeScreen(
                     showBannerIfUpdated = true,
                     allowDataRead = true,
                     context = ctx,
-                    enforceManualReadInterval = false
+                    isManualRefresh = false
                 )
                 markFirstInstallSyncDone(ctx)
             } else {
@@ -223,7 +232,7 @@ fun HomeScreen(
                     showBannerIfUpdated = true,
                     allowDataRead = true,
                     context = ctx,
-                    enforceManualReadInterval = false
+                    isManualRefresh = false
                 )
             }
         }
@@ -258,9 +267,11 @@ fun HomeScreen(
                 showBannerIfUpdated = true,
                 allowDataRead = true,
                 context = ctx,
-                enforceManualReadInterval = true
+                isManualRefresh = true
             )
-        }
+        },
+        refreshThreshold = 120.dp,
+        refreshingOffset = 88.dp
     )
 
     // Expanded state per card
@@ -276,13 +287,13 @@ fun HomeScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .nestedScroll(scrollBehavior.nestedScrollConnection)
             .pullRefresh(pullRefreshState)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (showUpdateOverlay) Modifier.blur(18.dp) else Modifier)
-                .nestedScroll(scrollBehavior.nestedScrollConnection)
         ) {
             PremiumHeader(selectedRoute = selectedRoute, syncing = syncing)
 
@@ -364,6 +375,7 @@ fun HomeScreen(
             modifier = Modifier.align(Alignment.TopCenter)
         )
 
+
         if (showUpdateOverlay && updateMessage.isNotBlank()) {
             FullUpdateOverlay(
                 title = "Update",
@@ -429,8 +441,277 @@ fun HomeScreen(
     }
 }
 
+@Composable
+private fun SkeletonLoadingOverlay(
+    appDark: Boolean
+) {
+    val screenBg = if (appDark) Color(0xFF0B1220) else Color(0xFFF7F8FA)
 
-/* ------------------ NOTICE NOTIFICATION ------------------ */
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(screenBg)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 16.dp, end = 16.dp, top = 18.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            FacebookTopBarSkeleton(appDark = appDark)
+            FacebookHeaderSkeleton(appDark = appDark)
+
+            repeat(6) { index ->
+                FacebookCommentSkeletonCard(
+                    appDark = appDark,
+                    compact = index % 3 == 0
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FacebookTopBarSkeleton(appDark: Boolean) {
+    val shimmer = rememberSkeletonBrush(appDark = appDark)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.58f)
+                    .height(28.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.28f)
+                    .height(12.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Box(
+            modifier = Modifier
+                .width(92.dp)
+                .height(34.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(shimmer)
+        )
+    }
+}
+
+@Composable
+private fun FacebookHeaderSkeleton(appDark: Boolean) {
+    val shimmer = rememberSkeletonBrush(appDark = appDark)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(28.dp))
+            .background(if (appDark) Color(0xFF111827) else Color.White)
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .background(shimmer)
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.48f)
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.28f)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.88f)
+                .height(14.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(shimmer)
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.64f)
+                .height(14.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(shimmer)
+        )
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(82.dp)
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+            Box(
+                modifier = Modifier
+                    .width(110.dp)
+                    .height(32.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+        }
+    }
+}
+
+@Composable
+private fun FacebookCommentSkeletonCard(
+    appDark: Boolean,
+    compact: Boolean = false
+) {
+    val shimmer = rememberSkeletonBrush(appDark = appDark)
+    val cardColor = if (appDark) Color(0xFF111827) else Color.White
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(cardColor)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(CircleShape)
+                .background(shimmer)
+        )
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.38f)
+                    .height(12.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .height(11.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(if (compact) 0.52f else 0.72f)
+                    .height(11.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+
+            if (!compact) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.82f)
+                        .height(11.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(54.dp)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+                Box(
+                    modifier = Modifier
+                        .width(44.dp)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+                Box(
+                    modifier = Modifier
+                        .width(60.dp)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberSkeletonBrush(appDark: Boolean): Brush {
+    val baseColor = if (appDark) Color(0xFF1F2937) else Color(0xFFE5E7EB)
+    val highlightColor = if (appDark) Color(0xFF374151) else Color(0xFFF8FAFC)
+
+    val transition = rememberInfiniteTransition(label = "skeleton_transition")
+    val translateX by transition.animateFloat(
+        initialValue = -300f,
+        targetValue = 1200f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1350, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "skeleton_translate"
+    )
+
+    return Brush.linearGradient(
+        colors = listOf(baseColor, highlightColor, baseColor),
+        start = Offset(translateX, 0f),
+        end = Offset(translateX + 260f, 220f)
+    )
+}
 
 /* ------------------ NOTICE NOTIFICATION ------------------ */
 

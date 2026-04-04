@@ -1395,9 +1395,11 @@ fun LiveMapScreen() {
                     !hasLocationPermission -> {
                         showLocationPermissionDialog = true
                     }
+
                     !isDeviceLocationEnabled() -> {
                         showEnableLocationDialog = true
                     }
+
                     else -> {
                         requestCenterOnUser = false
                         requestCenterOnUser = true
@@ -1873,9 +1875,12 @@ private fun OsmdroidLiveMap(
     }
 
     fun focusMapOnStop(mapView: MapView, point: GeoPoint) {
-        val targetZoom = maxOf(mapView.zoomLevelDouble, 18.0)
-        mapView.controller.animateTo(point, targetZoom, 550L)
-        mapView.postInvalidate()
+        mapView.post {
+            val targetZoom = maxOf(mapView.zoomLevelDouble, 18.0)
+            mapView.controller.setCenter(point)
+            mapView.controller.animateTo(point, targetZoom, 650L)
+            mapView.postInvalidate()
+        }
     }
 
     fun updateRouteStopMarkers(map: MapView, points: List<GeoPoint>, labels: List<String>) {
@@ -2084,8 +2089,12 @@ private fun OsmdroidLiveMap(
 
 
             if (shouldCenterNow) {
-                map.controller.setZoom(maxOf(map.zoomLevelDouble, 17.0))
-                map.controller.animateTo(point)
+                val targetZoom = maxOf(map.zoomLevelDouble, 18.0)
+                map.post {
+                    map.controller.setCenter(point)
+                    map.controller.animateTo(point, targetZoom, 700L)
+                    map.postInvalidate()
+                }
                 hasCenteredOnUserOnce = true
             }
 
@@ -2279,10 +2288,14 @@ private fun OsmdroidLiveMap(
 
             if (latestCenterOnUserRequest) {
                 lastUserLocation?.let {
-                    map.controller.setZoom(maxOf(map.zoomLevelDouble, 17.0))
-                    map.controller.animateTo(it)
-                    latestOnCenterConsumed()
+                    val targetZoom = maxOf(map.zoomLevelDouble, 17.5)
+                    map.post {
+                        map.controller.setCenter(it)
+                        map.controller.animateTo(it, targetZoom, 700L)
+                        map.postInvalidate()
+                    }
                 }
+                latestOnCenterConsumed()
             }
             }
         )
@@ -2354,12 +2367,22 @@ private fun OsmdroidLiveMap(
                 .clickable {
                     mapViewRef?.let { map ->
                         map.mapOrientation = 0f
-                        map.controller.animateTo(map.mapCenter)
                         lastUserLocation?.let { point ->
-                            updateLiveLocationMarker(map, point)
-                            updateLiveLocationRadar(map, point, 0f)
+                            val targetZoom = maxOf(map.zoomLevelDouble, 17.5)
+                            map.post {
+                                map.controller.setCenter(point)
+                                map.controller.animateTo(point, targetZoom, 650L)
+                                updateLiveLocationMarker(map, point)
+                                updateLiveLocationRadar(map, point, 0f)
+                                map.postInvalidate()
+                            }
+                        } ?: run {
+                            map.post {
+                                map.controller.setCenter(map.mapCenter)
+                                map.controller.animateTo(map.mapCenter, map.zoomLevelDouble, 450L)
+                                map.postInvalidate()
+                            }
                         }
-                        map.invalidate()
                         mapOrientationDeg = 0f
                     }
                 },

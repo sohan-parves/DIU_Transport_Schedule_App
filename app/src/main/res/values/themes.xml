@@ -4,10 +4,10 @@
     <!-- Main app theme (Compose uses this after launch) -->
     <style name="Theme.DIUTransportSchedule" parent="Theme.Material3.Dark.NoActionBar">
         <!-- Prevent white flash behind Compose while launching -->
-        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowBackground">#0B1220</item>
         <!-- Optional: keep status bar/navigation consistent on launch -->
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">#0B1220</item>
         <item name="windowActionBar">false</item>
         <item name="windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
@@ -19,7 +19,7 @@
     <!-- Android 12+ SplashScreen theme -->
     <style name="Theme.DIUTransportSchedule.Splash" parent="Theme.SplashScreen">
         <!-- Dark splash background so it never flashes white -->
-        <item name="windowSplashScreenBackground">@android:color/black</item>
+        <item name="windowSplashScreenBackground">#0B1220</item>
 
         <!-- Keep icon background transparent (system mask still applies) -->
         <item name="windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
@@ -31,9 +31,9 @@
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>
 
-        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowBackground">#0B1220</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">#0B1220</item>
 
         <!-- 🔒 System dark mode যেন UI change না করে -->
         <item name="android:forceDarkAllowed">false</item>

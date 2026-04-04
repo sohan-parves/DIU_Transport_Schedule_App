@@ -809,8 +809,8 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             return
         }
 
-        val soundOn = prefs.getBoolean(KEY_ALARM_SOUND_5M, true)
-        val vibrateOn = prefs.getBoolean(KEY_ALARM_VIBRATE_5M, true)
+        val soundOn = masterNotificationsEnabled && prefs.getBoolean(KEY_ALARM_SOUND_5M, true)
+        val vibrateOn = masterNotificationsEnabled && prefs.getBoolean(KEY_ALARM_VIBRATE_5M, true)
 
         // Use a HIGH-importance channel based on the current toggle combination.
         // The channels themselves are kept silent in ensureNotificationChannel(),

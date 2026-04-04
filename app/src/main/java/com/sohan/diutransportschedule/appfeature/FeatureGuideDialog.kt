@@ -1,132 +1,86 @@
 package com.sohan.diutransportschedule.appfeature
 
-import android.content.Context
-import com.sohan.diutransportschedule.BuildConfig
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.requiredWidth
-import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.input.pointer.pointerInput
-// import androidx.compose.ui.platform.LocalDensity
-// import kotlin.math.abs
 
-const val PREF_FEATURE_GUIDE = "feature_guide_prefs"
-const val KEY_FEATURE_GUIDE_LAST_VERSION = "feature_guide_last_version"
 
 data class AppFeatureGuideItem(
     val title: String,
     val description: String
 )
 
-object AppFeatureGuideContent {
-    val title = "Welcome to DIU Transport Schedule"
-    val subtitle = "Quick guide to help you get started"
-
-    val items = listOf(
-
-        AppFeatureGuideItem(
-            title = "Fast schedule loading",
-            description = "App opens quickly and only checks for updates at specific times to reduce data usage and improve performance."
-        ),
-
-        AppFeatureGuideItem(
-            title = "Search any route instantly",
-            description = "Easily find your bus by route number, stop name, or keywords using the search bar."
-        ),
-
-        AppFeatureGuideItem(
-            title = "Smart notice system",
-            description = "Important notices are automatically synced from the home screen and saved locally for fast access."
-        ),
-
-        AppFeatureGuideItem(
-            title = "Update alerts",
-            description = "Whenever the schedule changes, you’ll see an update message with the exact date and time of the update."
-        ),
-
-        AppFeatureGuideItem(
-            title = "Reminder notifications",
-            description = "Set reminders before bus departure time and get notified reliably with sound and alerts."
-        ),
-
-        AppFeatureGuideItem(
-            title = "Map & live location",
-            description = "View route paths, stops, and your current location on the map for better navigation."
-        ),
-
-        AppFeatureGuideItem(
-            title = "Offline access",
-            description = "Previously loaded schedules and notices are stored locally, so you can still view them without internet."
-        )
-
-    )
-}
+data class AppFeatureGuideModel(
+    val title: String,
+    val subtitle: String,
+    val items: List<AppFeatureGuideItem>,
+    val buttonText: String = "Got it"
+)
 
 @Composable
 fun AppFeatureGuideDialog(
-    title: String,
-    subtitle: String,
-    items: List<AppFeatureGuideItem>,
+    guide: AppFeatureGuideModel,
     onClose: () -> Unit
 ) {
     val configuration = LocalConfiguration.current
@@ -139,7 +93,6 @@ fun AppFeatureGuideDialog(
             listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 8
         }
     }
-
 
     val collapsedHeight = remember(configuration.screenHeightDp) {
         (configuration.screenHeightDp * 0.48f).dp
@@ -293,7 +246,7 @@ fun AppFeatureGuideDialog(
                             Spacer(modifier = Modifier.height(12.dp))
 
                             Text(
-                                text = title,
+                                text = guide.title,
                                 style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface,
@@ -305,7 +258,7 @@ fun AppFeatureGuideDialog(
                             Spacer(modifier = Modifier.height(6.dp))
 
                             Text(
-                                text = subtitle,
+                                text = guide.subtitle,
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface,
                                 lineHeight = 22.sp
@@ -361,7 +314,7 @@ fun AppFeatureGuideDialog(
                     ) {
                         item { Spacer(modifier = Modifier.height(2.dp)) }
 
-                        itemsIndexed(items) { index, item ->
+                        itemsIndexed(guide.items) { index, item ->
                             FeatureGuideItemCard(
                                 index = index + 1,
                                 item = item
@@ -383,7 +336,7 @@ fun AppFeatureGuideDialog(
                                 )
                             ) {
                                 Text(
-                                    text = "Got it",
+                                    text = guide.buttonText,
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -475,17 +428,4 @@ private fun FeatureGuideItemCard(
             )
         }
     }
-}
-
-fun shouldShowFeatureGuide(context: Context): Boolean {
-    val prefs = context.getSharedPreferences(PREF_FEATURE_GUIDE, Context.MODE_PRIVATE)
-    val lastSeenVersion = prefs.getInt(KEY_FEATURE_GUIDE_LAST_VERSION, -1)
-    return lastSeenVersion != BuildConfig.VERSION_CODE
-}
-
-fun markFeatureGuideShown(context: Context) {
-    context.getSharedPreferences(PREF_FEATURE_GUIDE, Context.MODE_PRIVATE)
-        .edit()
-        .putInt(KEY_FEATURE_GUIDE_LAST_VERSION, BuildConfig.VERSION_CODE)
-        .apply()
 }

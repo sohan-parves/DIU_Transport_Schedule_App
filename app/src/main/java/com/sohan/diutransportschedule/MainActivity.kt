@@ -104,10 +104,14 @@ import androidx.compose.ui.graphics.Color as ComposeColor
 import android.view.Window
 import com.google.firebase.firestore.FirebaseFirestore
 import com.sohan.diutransportschedule.BuildConfig
-import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
 import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
-import com.sohan.diutransportschedule.appfeature.markFeatureGuideShown
-import com.sohan.diutransportschedule.appfeature.shouldShowFeatureGuide
+import com.sohan.diutransportschedule.appfeature.AppUpdateFeatureGuideContent
+import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
+import com.sohan.diutransportschedule.appfeature.initializeFeatureGuideVersion
+import com.sohan.diutransportschedule.appfeature.markUpdateGuideShown
+import com.sohan.diutransportschedule.appfeature.markWelcomeGuideShown
+import com.sohan.diutransportschedule.appfeature.shouldShowUpdateGuide
+import com.sohan.diutransportschedule.appfeature.shouldShowWelcomeGuide
 import android.app.Activity
 import com.google.android.play.core.appupdate.AppUpdateManagerFactory
 import com.google.android.play.core.appupdate.AppUpdateOptions
@@ -119,6 +123,15 @@ import android.widget.TextView
 import androidx.compose.runtime.*
 import androidx.compose.material3.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 
 
 // ==============================
@@ -377,7 +390,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         requestWindowFeature(Window.FEATURE_NO_TITLE)
-        // ✅ Apply saved dark mode BEFORE first draw to avoid light flash
         val p = applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
         val savedDark = when {
             p.contains("dark_mode") -> p.getBoolean("dark_mode", false)
@@ -386,6 +398,15 @@ class MainActivity : ComponentActivity() {
             else -> true
         }
         super.onCreate(savedInstanceState)
+        window.setBackgroundDrawable(
+            android.graphics.drawable.ColorDrawable(
+                android.graphics.Color.parseColor(if (savedDark) "#0B1220" else "#F7F8FA")
+            )
+        )
+        window.decorView.setBackgroundColor(
+            if (savedDark) android.graphics.Color.parseColor("#0B1220")
+            else android.graphics.Color.parseColor("#F7F8FA")
+        )
         handleAlarmNotificationLaunch(intent)
         Log.d("RouteNotificationScheduler", "MainActivity onCreate")
         handleStopNoticeAlarm(intent)
@@ -416,6 +437,7 @@ class MainActivity : ComponentActivity() {
         ensureNotificationChannel(this, NOTIF_CHANNEL_ID_VIB_ONLY, NOTIF_CHANNEL_NAME, NOTIF_CHANNEL_DESC)
         ensureNotificationChannel(this, NOTIF_CHANNEL_ID_SILENT, NOTIF_CHANNEL_NAME, NOTIF_CHANNEL_DESC)
         syncNoticeCacheIfNeeded()
+        initializeFeatureGuideVersion(this)
 
         val app = application as App
 
@@ -424,42 +446,47 @@ class MainActivity : ComponentActivity() {
             val notificationsEnabled by vm.notificationsEnabled.collectAsState()
             val notifyLeadMinutes by vm.notifyLeadMinutes.collectAsState()
             val selectedRoute by vm.selectedRoute.collectAsState()
+            val initialUiReady by vm.initialUiReady.collectAsState()
 
-            // Use savedDark as the initial value for dark mode
-            val dark by vm.darkMode.collectAsState(initial = savedDark)
+            // Use the current StateFlow default for dark mode
+            val dark by vm.darkMode.collectAsState()
 
             DIUTransportScheduleTheme(darkTheme = dark) {
+                androidx.compose.runtime.SideEffect {
+                    window.decorView.setBackgroundColor(
+                        if (dark) android.graphics.Color.parseColor("#0B1220")
+                        else android.graphics.Color.parseColor("#F7F8FA")
+                    )
+                }
                 // ✅ FIRST TIME ENTER = permission ask + feature guide
                 RequestStartupPermissionsAndFeatureGuide()
                 LaunchedEffect(dark) {
-                    applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
-                        .edit()
-                        .putBoolean("dark_mode", dark)
-                        .apply()
+                    val prefs = applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
+                    val current = when {
+                        prefs.contains("dark_mode") -> prefs.getBoolean("dark_mode", false)
+                        prefs.contains("dark") -> prefs.getBoolean("dark", false)
+                        prefs.contains("darkMode") -> prefs.getBoolean("darkMode", false)
+                        else -> true
+                    }
+                    if (current != dark) {
+                        prefs.edit().putBoolean("dark_mode", dark).apply()
+                    }
                 }
                 val items by vm.items.collectAsState()
                 val syncing by vm.isSyncing.collectAsState()
+                val shouldShowStartupLoading = items.isEmpty() && (!initialUiReady || syncing)
 
-                // Always render the app, but blur + show full-screen overlay while syncing
+                // Show full-screen loading only before the first readable data is ready,
+// or when a cold start still has no items. After data exists, keep the UI visible.
                 androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
-                    androidx.compose.foundation.layout.Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .then(if (syncing) Modifier.blur(16.dp) else Modifier)
-                    ) {
-                        // Keep app running underneath so user sees it's loading
-                        MainNav(
-                            vm = vm,
-                            openNotice = openNoticeState.value,
-                            onNoticeOpened = { openNoticeState.value = false }
-                        )
-                    }
+                    MainNav(
+                        vm = vm,
+                        openNotice = openNoticeState.value,
+                        onNoticeOpened = { openNoticeState.value = false }
+                    )
 
-                    if (syncing) {
-                        FullScreenLoading(
-                            title = "",
-                            subtitle = if (items.isEmpty()) "Loading schedule…" else "Syncing…",
-                            logoResId = com.sohan.diutransportschedule.R.drawable.diu_logo,
+                    if (shouldShowStartupLoading) {
+                        SkeletonLoadingOverlay(
                             appDark = dark
                         )
                     }
@@ -701,6 +728,135 @@ private fun FullScreenLoading(
         }
     }
 }
+
+@Composable
+private fun SkeletonLoadingOverlay(
+    appDark: Boolean
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                if (appDark) ComposeColor(0xFF0B1220) else ComposeColor(0xFFF7F8FA)
+            )
+            .padding(horizontal = 16.dp, vertical = 18.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            repeat(5) {
+                FacebookCommentSkeletonCard(appDark = appDark)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FacebookCommentSkeletonCard(appDark: Boolean) {
+    val shimmer = rememberSkeletonBrush(appDark = appDark)
+    val cardColor = if (appDark) ComposeColor(0xFF111827) else ComposeColor.White
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(cardColor)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(CircleShape)
+                .background(shimmer)
+        )
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.38f)
+                    .height(12.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .height(11.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.72f)
+                    .height(11.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(shimmer)
+            )
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(54.dp)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+                Box(
+                    modifier = Modifier
+                        .width(44.dp)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+                Box(
+                    modifier = Modifier
+                        .width(60.dp)
+                        .height(10.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(shimmer)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberSkeletonBrush(appDark: Boolean): Brush {
+    val baseColor = if (appDark) ComposeColor(0xFF1F2937) else ComposeColor(0xFFE5E7EB)
+    val highlightColor = if (appDark) ComposeColor(0xFF374151) else ComposeColor(0xFFF8FAFC)
+
+    val transition = rememberInfiniteTransition(label = "skeleton_transition")
+    val translateX by transition.animateFloat(
+        initialValue = -300f,
+        targetValue = 900f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1100, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "skeleton_translate"
+    )
+
+    return Brush.linearGradient(
+        colors = listOf(baseColor, highlightColor, baseColor),
+        start = Offset(translateX, 0f),
+        end = Offset(translateX + 260f, 220f)
+    )
+}
+
 private const val ADMIN_UPDATES_CHANNEL_ID = "admin_updates"
 private fun ensureAdminUpdatesChannel(ctx: Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -731,8 +887,11 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         ctx.getSharedPreferences("startup_permissions", Context.MODE_PRIVATE)
     }
 
-    var showFeatureGuide by remember {
-        mutableStateOf(shouldShowFeatureGuide(ctx))
+    var showWelcomeGuide by remember {
+        mutableStateOf(shouldShowWelcomeGuide(ctx))
+    }
+    var showUpdateGuide by remember {
+        mutableStateOf(shouldShowUpdateGuide(ctx))
     }
 
     // asked=true মানে startup flow একবার complete হয়েছে
@@ -916,13 +1075,15 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
     var showBatteryOptDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        showFeatureGuide = shouldShowFeatureGuide(ctx)
+        showWelcomeGuide = shouldShowWelcomeGuide(ctx)
+        showUpdateGuide = shouldShowUpdateGuide(ctx)
     }
 
     // ✅ Startup flow
     LaunchedEffect(alreadyAsked, step, notifGranted, exactAlarmGranted) {
         if (alreadyAsked) {
-            showFeatureGuide = shouldShowFeatureGuide(ctx)
+            showWelcomeGuide = shouldShowWelcomeGuide(ctx)
+            showUpdateGuide = shouldShowUpdateGuide(ctx)
             return@LaunchedEffect
         }
 
@@ -989,7 +1150,8 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
             .apply()
 
         alreadyAsked = true
-        showFeatureGuide = shouldShowFeatureGuide(ctx)
+        showWelcomeGuide = shouldShowWelcomeGuide(ctx)
+        showUpdateGuide = shouldShowUpdateGuide(ctx)
 
         // Test notification dialog disabled (user requested)
     }
@@ -1138,14 +1300,22 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         )
     }
 
-    if (showFeatureGuide) {
+    if (showWelcomeGuide) {
         AppFeatureGuideDialog(
-            title = AppFeatureGuideContent.title,
-            subtitle = AppFeatureGuideContent.subtitle,
-            items = AppFeatureGuideContent.items,
+            guide = AppFeatureGuideContent.model,
             onClose = {
-                showFeatureGuide = false
-                markFeatureGuideShown(ctx)
+                showWelcomeGuide = false
+                markWelcomeGuideShown(ctx)
+            }
+        )
+    }
+
+    if (!showWelcomeGuide && showUpdateGuide) {
+        AppFeatureGuideDialog(
+            guide = AppUpdateFeatureGuideContent.model,
+            onClose = {
+                showUpdateGuide = false
+                markUpdateGuideShown(ctx)
             }
         )
     }
