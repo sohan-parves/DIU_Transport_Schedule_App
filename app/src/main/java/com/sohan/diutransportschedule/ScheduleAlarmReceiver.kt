@@ -220,19 +220,18 @@ object RunningAlertController {
 
     private val screenOffStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_SCREEN_OFF) {
+            if (
+                intent.action == Intent.ACTION_SCREEN_OFF ||
+                intent.action == Intent.ACTION_SCREEN_ON ||
+                intent.action == Intent.ACTION_USER_PRESENT
+            ) {
                 try {
+                    // Any power-button interaction that turns the screen OFF / ON,
+                    // or unlocks the device, should stop only the running alert.
+                    // Keep the notification visible for manual dismissal.
                     RunningAlertController.stop(context.applicationContext)
-                } catch (_: Throwable) {}
-
-                try {
-                    NotificationManagerCompat.from(context.applicationContext).cancel(ALARM_REQ_CODE)
-                } catch (_: Throwable) {}
-
-                try {
-                    val nm = context.applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    nm.cancel(ALARM_REQ_CODE)
-                } catch (_: Throwable) {}
+                } catch (_: Throwable) {
+                }
             }
         }
     }
@@ -281,22 +280,15 @@ object RunningAlertController {
                     super.onChange(selfChange)
 
                     if (!isAlertRunning) return
+                    if (!hasAnyTrackedVolumeChanged(context.applicationContext)) {
+                        captureCurrentVolumes(context.applicationContext)
+                        return
+                    }
 
                     try {
-                        // 🔥 Immediate stop without extra checks
+                        // Any volume-button interaction should stop only the running alert.
+                        // Keep the notification visible so the user can dismiss it manually.
                         RunningAlertController.stop(context.applicationContext)
-
-                        try {
-                            NotificationManagerCompat.from(context.applicationContext)
-                                .cancel(ALARM_REQ_CODE)
-                        } catch (_: Throwable) {}
-
-                        try {
-                            val nm = context.applicationContext
-                                .getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                            nm.cancel(ALARM_REQ_CODE)
-                        } catch (_: Throwable) {}
-
                     } catch (_: Throwable) {
                     }
                 }
@@ -466,7 +458,11 @@ object RunningAlertController {
         currentSessionId = newSessionId
         try {
             if (!screenOffReceiverRegistered) {
-                val filter = android.content.IntentFilter(Intent.ACTION_SCREEN_OFF)
+                val filter = android.content.IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(Intent.ACTION_USER_PRESENT)
+                }
                 context.applicationContext.registerReceiver(screenOffStopReceiver, filter)
                 screenOffReceiverRegistered = true
             }
@@ -587,7 +583,8 @@ object RunningAlertController {
             vibrating = false
         }
 
-        // Auto-timeout after duration: stop alert and try to open app.
+        // Auto-timeout after duration: stop only the running sound/vibration.
+        // Keep the notification visible so the user must dismiss it manually.
         try {
             val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             val timeoutAt = System.currentTimeMillis() + durationMs
@@ -611,7 +608,7 @@ object RunningAlertController {
                 am.setExact(AlarmManager.RTC_WAKEUP, timeoutAt, timeoutPi)
             }
         } catch (t: Throwable) {
-            Log.e("ScheduleAlarmReceiver", "Failed to schedule timeout auto-open", t)
+            Log.e("ScheduleAlarmReceiver", "Failed to schedule timeout stop-only action", t)
         }
     }
 }
@@ -724,16 +721,9 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         }
         Log.d("ScheduleAlarmReceiver", "onReceive action=${intent.action} title=${intent.getStringExtra(EXTRA_TITLE)} text=${intent.getStringExtra(EXTRA_TEXT)}")
         if (action == ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT) {
+            // Stop only the running ringtone/vibration after 5 minutes.
+            // Keep the notification in the panel until the user dismisses it manually.
             RunningAlertController.stop(context.applicationContext)
-            try {
-                NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
-            } catch (_: Throwable) {
-            }
-            try {
-                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                nm.cancel(ALARM_REQ_CODE)
-            } catch (_: Throwable) {
-            }
             return
         }
         // --- De-dupe: some devices/OS versions may deliver the same alarm twice ---
@@ -995,7 +985,6 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         // Heads-up popup will still depend on HIGH/MAX notification importance + priority.
         builder.setTicker(collapsedTitle)
         builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-        builder.setTimeoutAfter(5 * 60 * 1000L)
 
         // NOTE: Don't let the Notification itself play sound/vibration.
         // We always drive sound/vibration via RunningAlertController so the user toggles work

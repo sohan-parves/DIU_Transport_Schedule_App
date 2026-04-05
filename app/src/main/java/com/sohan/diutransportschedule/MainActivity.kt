@@ -545,9 +545,27 @@ class MainActivity : ComponentActivity() {
                             "RouteNotificationScheduler",
                             "scheduleNextAlarmFromData called: selectedRoute=$selectedRoute leadMinutes=$notifyLeadMinutes items=${items.size}"
                         )
+                        val todayIsFriday = try {
+                            java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+                        } catch (_: Throwable) {
+                            false
+                        }
+
+                        val normalizedSelectedRoute = selectedRoute.trim()
+                        val selectedIsAll = normalizedSelectedRoute.equals("ALL", ignoreCase = true)
+                        val selectedIsFridayRoute = normalizedSelectedRoute.startsWith("F", ignoreCase = true)
+
+                        val notificationRoute = when {
+                            selectedIsAll -> "ALL"
+                            todayIsFriday && selectedIsFridayRoute -> normalizedSelectedRoute
+                            todayIsFriday && !selectedIsFridayRoute -> "ALL"
+                            !todayIsFriday && selectedIsFridayRoute -> "ALL"
+                            else -> normalizedSelectedRoute
+                        }
+
                         scheduleNextAlarmFromData(
                             context = ctx,
-                            selectedRoute = selectedRoute,
+                            selectedRoute = notificationRoute,
                             leadMinutes = notifyLeadMinutes,
                             items = items
                         )
@@ -581,8 +599,9 @@ class MainActivity : ComponentActivity() {
                 android.view.KeyEvent.KEYCODE_VOLUME_DOWN,
                 android.view.KeyEvent.KEYCODE_VOLUME_MUTE -> {
                     try {
+                        // Stop only the running ringtone/vibration.
+                        // Keep the notification visible until the user dismisses it manually.
                         RunningAlertController.stop(applicationContext)
-                        NotificationManagerCompat.from(applicationContext).cancel(ALARM_REQ_CODE)
                     } catch (_: Throwable) {
                     }
                     return true
@@ -739,15 +758,16 @@ private fun SkeletonLoadingOverlay(
             .background(
                 if (appDark) ComposeColor(0xFF0B1220) else ComposeColor(0xFFF7F8FA)
             )
-            .padding(horizontal = 16.dp, vertical = 18.dp)
+            .padding(horizontal = 16.dp, vertical = 18.dp),
+        contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.TopCenter),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            repeat(5) {
+            repeat(4) {
                 FacebookCommentSkeletonCard(appDark = appDark)
             }
         }
@@ -762,6 +782,7 @@ private fun FacebookCommentSkeletonCard(appDark: Boolean) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .widthIn(max = 640.dp)
             .clip(RoundedCornerShape(20.dp))
             .background(cardColor)
             .padding(horizontal = 14.dp, vertical = 14.dp),

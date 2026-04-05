@@ -68,6 +68,7 @@ class HomeViewModel(
     val currentAppVersionName: String = BuildConfig.VERSION_NAME
 
     private val query = MutableStateFlow("")
+    private val selectedFridayRoute = MutableStateFlow("ALL")
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
@@ -91,6 +92,12 @@ class HomeViewModel(
 
     private fun firestoreWindowPrefs(context: Context?): SharedPreferences? {
         return context?.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
+    }
+
+    private fun syncFridayRouteFromPrefs(context: Context?) {
+        val prefs = context?.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
+        val saved = prefs?.getString("selected_friday_route", "").orEmpty().trim()
+        selectedFridayRoute.value = if (saved.isBlank()) "ALL" else saved
     }
 
 
@@ -184,14 +191,25 @@ class HomeViewModel(
                 if (!unique.containsKey(no)) unique[no] = it.routeName.trim()
             }
 
-            val options = unique.entries
+            val allOptions = unique.entries
                 .map { (no, name) ->
                     val label = if (name.isNotBlank()) "$name ($no)" else no
                     RouteOption(routeNo = no, label = label)
                 }
+
+            val dailyOptions = allOptions
+                .filterNot { it.routeNo.trim().startsWith("F", ignoreCase = true) }
                 .sortedBy { it.routeNo }
 
-            listOf(RouteOption(routeNo = "ALL", label = "All Routes")) + options
+            val fridayOptions = allOptions
+                .filter { it.routeNo.trim().startsWith("F", ignoreCase = true) }
+                .sortedBy { it.routeNo }
+
+            buildList {
+                add(RouteOption(routeNo = "ALL", label = "All Routes"))
+                addAll(dailyOptions)
+                addAll(fridayOptions)
+            }
         }
         .stateIn(
             viewModelScope,
@@ -229,7 +247,7 @@ class HomeViewModel(
 
     // ✅ Home items: Search overrides Profile route filter
     val items: StateFlow<List<UiSchedule>> =
-        combine(localUi, selectedRoute, query) { list, route, q ->
+        combine(localUi, selectedRoute, query, selectedFridayRoute) { list, route, q, fridayRoute ->
             val rawQuery = q.trim()
             val qq = rawQuery.lowercase()
 
@@ -239,14 +257,28 @@ class HomeViewModel(
                 false
             }
 
+            val normalizedFridayRoute = fridayRoute.trim()
+            val fridayAllSelected = normalizedFridayRoute.isBlank() || normalizedFridayRoute.equals("ALL", ignoreCase = true)
             val noFilterHome = rawQuery.isBlank() && route.equals("ALL", ignoreCase = true)
 
             val base = when {
                 // SEARCH: always show everything
                 rawQuery.isNotEmpty() -> list
 
-                // HOME (no filter): show everything including Friday
-                noFilterHome -> list
+                // HOME (no filter): show all daily routes, plus Friday routes.
+                // If a specific Friday route is selected, include only that Friday route.
+                noFilterHome -> {
+                    val dailyItems = list.filter { it.appliesOn != "FRIDAY" }
+                    val fridayItems = if (fridayAllSelected) {
+                        list.filter { it.appliesOn == "FRIDAY" }
+                    } else {
+                        list.filter {
+                            it.appliesOn == "FRIDAY" &&
+                                    it.routeNo.equals(normalizedFridayRoute, ignoreCase = true)
+                        }
+                    }
+                    dailyItems + fridayItems
+                }
 
                 // FILTERED (route selected): apply day rule
                 else -> {
@@ -257,9 +289,21 @@ class HomeViewModel(
                     }
 
                     if (todayIsFriday) {
-                        routeFiltered.filter { it.appliesOn == "FRIDAY" }
+                        if (route.equals("ALL", ignoreCase = true)) {
+                            routeFiltered.filter { it.appliesOn == "FRIDAY" }
+                        } else if (route.trim().startsWith("F", ignoreCase = true)) {
+                            routeFiltered.filter { it.appliesOn == "FRIDAY" }
+                        } else {
+                            emptyList()
+                        }
                     } else {
-                        routeFiltered.filter { it.appliesOn != "FRIDAY" }
+                        if (route.equals("ALL", ignoreCase = true)) {
+                            routeFiltered.filter { it.appliesOn != "FRIDAY" }
+                        } else if (route.trim().startsWith("F", ignoreCase = true)) {
+                            emptyList()
+                        } else {
+                            routeFiltered.filter { it.appliesOn != "FRIDAY" }
+                        }
                     }
                 }
             }
@@ -313,6 +357,7 @@ class HomeViewModel(
         syncMutex.withLock {
             if (_isSyncing.value) return
             _syncStatusMessage.value = ""
+            syncFridayRouteFromPrefs(context)
 
             val isAutoRefresh = !isManualRefresh
 
@@ -467,6 +512,10 @@ class HomeViewModel(
         viewModelScope.launch { repo.setSelectedRoute(routeNo) }
     }
 
+    fun setSelectedFridayRoute(routeNo: String) {
+        selectedFridayRoute.value = routeNo.trim().ifBlank { "ALL" }
+    }
+
     fun setDarkMode(enabled: Boolean) {
         viewModelScope.launch { repo.setDarkMode(enabled) }
     }
@@ -520,12 +569,21 @@ class HomeViewModel(
             false
         }
 
-        if (todayIsFriday) {
+        val normalizedRoute = selectedRoute.trim()
+        val isAllRoute = normalizedRoute.equals("ALL", ignoreCase = true)
+        val isFridayRoute = normalizedRoute.startsWith("F", ignoreCase = true)
+
+        if (!enabled || isAllRoute) {
             RouteNotificationScheduler.cancelAll(context)
             return
         }
 
-        if (!enabled || selectedRoute.equals("ALL", ignoreCase = true)) {
+        if (todayIsFriday && !isFridayRoute) {
+            RouteNotificationScheduler.cancelAll(context)
+            return
+        }
+
+        if (!todayIsFriday && isFridayRoute) {
             RouteNotificationScheduler.cancelAll(context)
             return
         }

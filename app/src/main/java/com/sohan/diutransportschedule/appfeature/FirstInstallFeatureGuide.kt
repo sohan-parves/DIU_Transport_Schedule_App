@@ -11,28 +11,28 @@ object AppFeatureGuideContent {
         subtitle = "Quick guide to help you get started",
         items = listOf(
             AppFeatureGuideItem(
-                title = "Fast schedule loading",
-                description = "App opens quickly and only checks for updates at specific times to reduce data usage and improve performance."
+                title = "Daily and Friday route setup",
+                description = "You can set one route for regular days and a separate route for Friday, so reminders follow the correct schedule for each day."
             ),
             AppFeatureGuideItem(
-                title = "Search any route instantly",
-                description = "Easily find your bus by route number, stop name, or keywords using the search bar."
+                title = "Route-based reminder alerts",
+                description = "Reminder notifications work from your selected route, with sound, vibration, and notification controls available from settings."
             ),
             AppFeatureGuideItem(
-                title = "Smart notice system",
-                description = "Important notices are automatically synced from the home screen and saved locally for fast access."
+                title = "Fast search and quick access",
+                description = "Find schedules quickly by route number, stop name, or keyword, and move between tabs smoothly for faster use."
             ),
             AppFeatureGuideItem(
-                title = "Reminder notifications",
-                description = "Set reminders before bus departure time and get notified reliably with sound and alerts."
+                title = "Map with live location",
+                description = "Open the map to view route lines, stops, and your current location for easier navigation during travel."
             ),
             AppFeatureGuideItem(
-                title = "Map & live location",
-                description = "View route paths, stops, and your current location on the map for better navigation."
+                title = "Smart notices and updates",
+                description = "Important notices are synced and stored locally, and the app checks for schedule updates at fixed time slots to reduce extra data use."
             ),
             AppFeatureGuideItem(
-                title = "Offline access",
-                description = "Previously loaded schedules and notices are stored locally, so you can still view them without internet."
+                title = "Offline-friendly experience",
+                description = "Previously loaded schedule and notice data stay saved on your device, so you can still view important information even with poor internet."
             )
         )
     )

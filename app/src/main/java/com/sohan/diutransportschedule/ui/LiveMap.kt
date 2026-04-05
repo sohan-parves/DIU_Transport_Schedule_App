@@ -105,6 +105,7 @@ import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
 import android.content.res.Configuration
 import androidx.collection.LruCache
+import android.content.SharedPreferences
 
 sealed class OfflineState {
     data object NotDownloaded : OfflineState()
@@ -407,9 +408,28 @@ private fun readPersistentRouteMapCache(ctx: Context, routeNo: String): CachedRo
 }
 
 @Composable
-fun LiveMapScreen() {
+fun LiveMapScreen(isTabActive: Boolean = true) {
     val ctx = LocalContext.current
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    // Map compass / box UI should follow only the app's saved dark-mode preference,
+// not the phone's system dark/light mode.
+    val mapUiPrefs = remember {
+        ctx.getSharedPreferences("route_prefs", Context.MODE_PRIVATE)
+    }
+    var isDark by remember {
+        mutableStateOf(mapUiPrefs.getBoolean("dark_mode", false))
+    }
+
+    DisposableEffect(Unit) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
+            if (key == "dark_mode") {
+                isDark = sharedPreferences.getBoolean("dark_mode", false)
+            }
+        }
+        mapUiPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            mapUiPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
     val overlayScrim = if (isDark) Color.Black.copy(alpha = 0.30f) else Color.Black.copy(alpha = 0.18f)
 
     // --- Permission state & launcher
@@ -439,6 +459,12 @@ fun LiveMapScreen() {
     }
 
     var showEnableLocationDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isTabActive) {
+        if (!isTabActive) {
+            requestCenterOnUser = false
+        }
+    }
 
     val routeId by SelectedRoadStore.routeIdFlow(ctx).collectAsState(initial = "")
     val shouldPromptRoadSelection = routeId.isBlank() || routeId.trim().equals("ALL", ignoreCase = true)
@@ -1176,7 +1202,8 @@ fun LiveMapScreen() {
             routeStopMarkerLabels = routeStopMarkerLabels,
             drawRoadLine = routeHasRealRoadPolyline,
             centerOnUserRequest = requestCenterOnUser,
-            onCenterConsumed = { requestCenterOnUser = false }
+            onCenterConsumed = { requestCenterOnUser = false },
+            isTabActive = isTabActive
         )
         val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
         val topCardBg = if (isDark) Color(0xFF0A1F44) else Color.White
@@ -1661,7 +1688,8 @@ private fun OsmdroidLiveMap(
     routeStopMarkerLabels: List<String>,
     drawRoadLine: Boolean,
     centerOnUserRequest: Boolean,
-    onCenterConsumed: () -> Unit
+    onCenterConsumed: () -> Unit,
+    isTabActive: Boolean
 ){
     val ctx = LocalContext.current
     LaunchedEffect(Unit) {
@@ -1670,6 +1698,25 @@ private fun OsmdroidLiveMap(
 
     val fused = remember { LocationServices.getFusedLocationProviderClient(ctx) }
     var locationCallback by remember { mutableStateOf<LocationCallback?>(null) }
+    var liveLocationCallback by remember { mutableStateOf<LocationCallback?>(null) }
+
+    fun stopLiveLocationUpdates() {
+        try {
+            liveLocationCallback?.let { callback ->
+                fused.removeLocationUpdates(callback)
+            }
+        } catch (_: Throwable) {
+        }
+        try {
+            locationCallback?.let { callback ->
+                fused.removeLocationUpdates(callback)
+            }
+        } catch (_: Throwable) {
+        }
+        liveLocationCallback = null
+        locationCallback = null
+    }
+
     var lastUserLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var lastAccuracyMeters by remember { mutableStateOf<Float?>(null) }
     var hasCenteredOnUserOnce by remember { mutableStateOf(false) }
@@ -1687,6 +1734,7 @@ private fun OsmdroidLiveMap(
     var lastRenderedLiveLocationKey by remember { mutableStateOf<String?>(null) }
     var lastRadarAnimationFrameMs by remember { mutableLongStateOf(0L) }
     var lastRadarPhaseBucket by remember { mutableIntStateOf(-1) }
+    var lastGestureRefreshMs by remember { mutableLongStateOf(0L) }
     val latestCenterOnUserRequest by rememberUpdatedState(centerOnUserRequest)
     val latestOnCenterConsumed by rememberUpdatedState(onCenterConsumed)
     val latestRoutePoints by rememberUpdatedState(routePoints)
@@ -1702,18 +1750,47 @@ private fun OsmdroidLiveMap(
     val compassNorthNeedle = if (isDark) Color(0xFFFF5A52) else Color(0xFFE53935)
     val compassSouthNeedle = Color.White
 
+    DisposableEffect(isTabActive) {
+        if (!isTabActive) {
+            stopLiveLocationUpdates()
+            lastUserLocation = null
+            lastAccuracyMeters = null
+            lastRenderedLiveLocationKey = null
+            lastRadarAnimationFrameMs = 0L
+            lastRadarPhaseBucket = -1
+            livePulseAnimator?.cancel()
+            livePulseAnimator = null
+            hasCenteredOnUserOnce = false
+            mapViewRef?.let { map ->
+                map.overlays.removeAll { overlay ->
+                    (overlay is Marker && overlay.relatedObject == "live_location_marker") ||
+                            (overlay is Polygon && overlay.title == "live_location_accuracy_circle")
+                }
+                map.postInvalidate()
+            }
+        }
+        onDispose {
+            stopLiveLocationUpdates()
+        }
+    }
+
     val sensorManager = remember {
         ctx.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     }
 
+    val windowManager = remember {
+        ContextCompat.getSystemService(ctx, android.view.WindowManager::class.java)
+    }
 
-    DisposableEffect(sensorManager) {
+
+    DisposableEffect(sensorManager, windowManager) {
         val rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
         if (rotationSensor == null) {
             onDispose { }
         } else {
             val rotationMatrix = FloatArray(9)
+            val remappedRotationMatrix = FloatArray(9)
             val orientationAngles = FloatArray(3)
 
             val listener = object : SensorEventListener {
@@ -1721,7 +1798,22 @@ private fun OsmdroidLiveMap(
                     if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
 
                     SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                    SensorManager.getOrientation(rotationMatrix, orientationAngles)
+
+                    val displayRotation = windowManager?.defaultDisplay?.rotation ?: android.view.Surface.ROTATION_0
+                    val (axisX, axisY) = when (displayRotation) {
+                        android.view.Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
+                        android.view.Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
+                        android.view.Surface.ROTATION_270 -> SensorManager.AXIS_MINUS_Y to SensorManager.AXIS_X
+                        else -> SensorManager.AXIS_X to SensorManager.AXIS_Y
+                    }
+
+                    SensorManager.remapCoordinateSystem(
+                        rotationMatrix,
+                        axisX,
+                        axisY,
+                        remappedRotationMatrix
+                    )
+                    SensorManager.getOrientation(remappedRotationMatrix, orientationAngles)
 
                     val azimuthDeg = Math.toDegrees(orientationAngles[0].toDouble()).toFloat()
                     deviceHeadingDeg = ((azimuthDeg % 360f) + 360f) % 360f
@@ -2118,7 +2210,7 @@ private fun OsmdroidLiveMap(
                 sortMapOverlays(map)
             }
 
-            map.postInvalidate()
+            map.invalidate()
         }
     }
 
@@ -2157,6 +2249,9 @@ private fun OsmdroidLiveMap(
                 setMultiTouchControls(true)
                 controller.setZoom(15.0)
                 clipToPadding = false
+                setTilesScaledToDpi(true)
+                isHorizontalMapRepetitionEnabled = false
+                isVerticalMapRepetitionEnabled = false
                 applyTileProvider(this, mbtilesPath)
 
                 val rotationOverlay = RotationGestureOverlay(this).apply {
@@ -2179,27 +2274,38 @@ private fun OsmdroidLiveMap(
 
                     override fun onZoom(event: ZoomEvent?): Boolean {
                         mapOrientationDeg = this@apply.mapOrientation
+
+                        val now = android.os.SystemClock.uptimeMillis()
+                        if ((now - lastGestureRefreshMs) < 48L) return false
+                        lastGestureRefreshMs = now
+
                         lastUserLocation?.let { point ->
                             updateLiveLocationRadar(this@apply, point, 0f)
-                            this@apply.postInvalidate()
+                            this@apply.invalidate()
                         }
                         return false
                     }
                 })
 
-                setOnTouchListener { _, event ->
+                isClickable = true
+                isLongClickable = true
+                isFocusable = true
+                isFocusableInTouchMode = true
+
+                setOnTouchListener { view, event ->
                     when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN,
                         MotionEvent.ACTION_MOVE,
                         MotionEvent.ACTION_POINTER_DOWN,
-                        MotionEvent.ACTION_POINTER_UP,
+                        MotionEvent.ACTION_POINTER_UP -> {
+                            view.parent?.requestDisallowInterceptTouchEvent(true)
+                        }
                         MotionEvent.ACTION_UP,
                         MotionEvent.ACTION_CANCEL -> {
-                            post {
-                                mapOrientationDeg = this@apply.mapOrientation
-                            }
+                            view.parent?.requestDisallowInterceptTouchEvent(false)
                         }
                     }
-                    false
+                    view.onTouchEvent(event)
                 }
 
                 mapViewRef = this
@@ -2243,7 +2349,7 @@ private fun OsmdroidLiveMap(
                     updateRoutePolylineOverlays(map, routePoints, drawRoadLine)
                     updateRouteStopMarkers(map, routeStopMarkerPoints, routeStopMarkerLabels)
                     sortMapOverlays(map)
-                    map.postInvalidate()
+                    map.invalidate()
                     lastRenderedRouteSignature = routeSignature
                 }
 
@@ -2291,8 +2397,8 @@ private fun OsmdroidLiveMap(
                     val targetZoom = maxOf(map.zoomLevelDouble, 17.5)
                     map.post {
                         map.controller.setCenter(it)
-                        map.controller.animateTo(it, targetZoom, 700L)
-                        map.postInvalidate()
+                        map.controller.animateTo(it, targetZoom, 520L)
+                        map.invalidate()
                     }
                 }
                 latestOnCenterConsumed()
@@ -2321,7 +2427,7 @@ private fun OsmdroidLiveMap(
                     val now = android.os.SystemClock.uptimeMillis()
                     val phaseBucket = (phase * 18f).toInt()
                     val shouldRedraw =
-                        (now - lastRadarAnimationFrameMs) >= 33L || phaseBucket != lastRadarPhaseBucket
+                        (now - lastRadarAnimationFrameMs) >= 48L || phaseBucket != lastRadarPhaseBucket
 
                     if (!shouldRedraw) return@addUpdateListener
 
@@ -2330,7 +2436,7 @@ private fun OsmdroidLiveMap(
 
                     lastUserLocation?.let { point ->
                         updateLiveLocationRadar(map, point, phase)
-                        map.postInvalidate()
+                        map.invalidate()
                     }
                 }
                 start()
@@ -2351,7 +2457,7 @@ private fun OsmdroidLiveMap(
 
     val normalizedMapRotation = ((mapOrientationDeg % 360f) + 360f) % 360f
     val normalizedHeadingRotation = ((deviceHeadingDeg % 360f) + 360f) % 360f
-    val effectiveCompassRotation = ((normalizedMapRotation + normalizedHeadingRotation) % 360f + 360f) % 360f
+    val effectiveCompassRotation = ((normalizedHeadingRotation - normalizedMapRotation) % 360f + 360f) % 360f
 
     Box(
         modifier = Modifier
@@ -2367,21 +2473,10 @@ private fun OsmdroidLiveMap(
                 .clickable {
                     mapViewRef?.let { map ->
                         map.mapOrientation = 0f
-                        lastUserLocation?.let { point ->
-                            val targetZoom = maxOf(map.zoomLevelDouble, 17.5)
-                            map.post {
-                                map.controller.setCenter(point)
-                                map.controller.animateTo(point, targetZoom, 650L)
-                                updateLiveLocationMarker(map, point)
-                                updateLiveLocationRadar(map, point, 0f)
-                                map.postInvalidate()
-                            }
-                        } ?: run {
-                            map.post {
-                                map.controller.setCenter(map.mapCenter)
-                                map.controller.animateTo(map.mapCenter, map.zoomLevelDouble, 450L)
-                                map.postInvalidate()
-                            }
+                        map.post {
+                            map.controller.setCenter(map.mapCenter)
+                            map.controller.animateTo(map.mapCenter, map.zoomLevelDouble, 450L)
+                            map.postInvalidate()
                         }
                         mapOrientationDeg = 0f
                     }
@@ -2509,12 +2604,9 @@ private fun OsmdroidLiveMap(
         }
     }
 
-    DisposableEffect(enableLiveLocation) {
-        if (!enableLiveLocation) {
-            locationCallback?.let {
-                try { fused.removeLocationUpdates(it) } catch (_: SecurityException) { }
-            }
-            locationCallback = null
+    DisposableEffect(enableLiveLocation, isTabActive) {
+        if (!enableLiveLocation || !isTabActive) {
+            stopLiveLocationUpdates()
             lastUserLocation = null
             lastAccuracyMeters = null
             lastRenderedLiveLocationKey = null
@@ -2530,7 +2622,9 @@ private fun OsmdroidLiveMap(
                 }
                 map.postInvalidate()
             }
-            onDispose { }
+            onDispose {
+                stopLiveLocationUpdates()
+            }
         } else {
             val callback = object : LocationCallback() {
                 override fun onLocationResult(result: LocationResult) {
@@ -2543,15 +2637,17 @@ private fun OsmdroidLiveMap(
                     }
                 }
             }
+            liveLocationCallback = callback
+            locationCallback = callback
 
             val request = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 2000L)
                 .setMinUpdateDistanceMeters(1f)
                 .setWaitForAccurateLocation(false)
                 .build()
 
-            locationCallback = callback
             try {
                 fused.lastLocation.addOnSuccessListener { lastKnown ->
+                    if (!isTabActive) return@addOnSuccessListener
                     if (lastKnown != null && lastUserLocation == null) {
                         updateUserLocationOnMap(
                             lastKnown,
@@ -2561,11 +2657,15 @@ private fun OsmdroidLiveMap(
                 }
                 fused.requestLocationUpdates(request, callback, Looper.getMainLooper())
             } catch (_: SecurityException) {
+                liveLocationCallback = null
                 locationCallback = null
             }
 
             onDispose {
                 try { fused.removeLocationUpdates(callback) } catch (_: SecurityException) { }
+                if (liveLocationCallback === callback) {
+                    liveLocationCallback = null
+                }
                 if (locationCallback === callback) {
                     locationCallback = null
                 }
@@ -2586,16 +2686,14 @@ private fun OsmdroidLiveMap(
 
     DisposableEffect(Unit) {
         onDispose {
-            locationCallback?.let {
-                try { fused.removeLocationUpdates(it) } catch (_: SecurityException) { }
-            }
-            locationCallback = null
+            stopLiveLocationUpdates()
             lastUserLocation = null
             lastAccuracyMeters = null
             lastRenderedRouteSignature = null
             lastRenderedLiveLocationKey = null
             lastRadarAnimationFrameMs = 0L
             lastRadarPhaseBucket = -1
+            lastGestureRefreshMs = 0L
             routeStopMarkerBitmapCache.evictAll()
             liveLocationMarkerBitmapCache.evictAll()
 

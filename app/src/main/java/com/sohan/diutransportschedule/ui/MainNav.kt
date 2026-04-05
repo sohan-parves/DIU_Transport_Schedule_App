@@ -15,10 +15,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.navigation.compose.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.TileMode
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.ui.zIndex
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -27,18 +29,12 @@ fun MainNav(
     openNotice: Boolean = false,
     onNoticeOpened: () -> Unit = {}
 ) {
-    val nav = rememberNavController()
-    val backStack by nav.currentBackStackEntryAsState()
-    val currentRoute = backStack?.destination?.route ?: "home"
+    var currentRoute by rememberSaveable { mutableStateOf("home") }
+    val saveableStateHolder = rememberSaveableStateHolder()
 
     fun navigateInstant(route: String) {
         if (currentRoute == route) return
-        nav.navigate(route) {
-            launchSingleTop = true
-            popUpTo(nav.graph.startDestinationId) {
-                inclusive = false
-            }
-        }
+        currentRoute = route
     }
 
     LaunchedEffect(openNotice) {
@@ -71,14 +67,50 @@ fun MainNav(
             )
         }
     ) { pad ->
-        NavHost(
-            navController = nav,
-            startDestination = "home"
-        ) {
-            composable("home") { HomeScreen(vm = vm, pad = pad) }
-            composable("map") { LiveMapScreen() }
-            composable("notice") { NoticeScreen(pad = pad) }
-            composable("profile") { ProfileScreen(vm) }
+        Box(modifier = Modifier.fillMaxSize()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(if (currentRoute == "home") 4f else 0f)
+                    .background(if (currentRoute == "home") MaterialTheme.colorScheme.background else Color.Transparent)
+            ) {
+                saveableStateHolder.SaveableStateProvider("home") {
+                    HomeScreen(vm = vm, pad = pad)
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(if (currentRoute == "map") 4f else 0f)
+                    .background(if (currentRoute == "map") MaterialTheme.colorScheme.background else Color.Transparent)
+            ) {
+                saveableStateHolder.SaveableStateProvider("map") {
+                    LiveMapScreen(isTabActive = currentRoute == "map")
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(if (currentRoute == "notice") 4f else 0f)
+                    .background(if (currentRoute == "notice") MaterialTheme.colorScheme.background else Color.Transparent)
+            ) {
+                saveableStateHolder.SaveableStateProvider("notice") {
+                    NoticeScreen(pad = pad)
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(if (currentRoute == "profile") 4f else 0f)
+                    .background(if (currentRoute == "profile") MaterialTheme.colorScheme.background else Color.Transparent)
+            ) {
+                saveableStateHolder.SaveableStateProvider("profile") {
+                    ProfileScreen(vm)
+                }
+            }
         }
     }
 }

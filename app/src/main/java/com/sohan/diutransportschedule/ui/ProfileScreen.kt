@@ -119,6 +119,13 @@ import androidx.compose.material3.MenuAnchorType
 import android.Manifest
 import android.provider.Settings
 import androidx.core.content.ContextCompat
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.key
+import androidx.compose.material.icons.outlined.Info
+import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
+import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
 
 private fun ColorScheme.surfaceColorAtElevationCompat(elevation: Dp): Color {
     if (elevation == 0.dp) return surface
@@ -131,21 +138,62 @@ fun ProfileScreen(vm: HomeViewModel) {
     val dark by vm.darkMode.collectAsState()
     val selectedRoute by vm.selectedRoute.collectAsState()
     val isFriday = java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+    val isSelectedAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
+    val isSelectedFridayRoute = selectedRoute.trim().startsWith("F", ignoreCase = true)
 
-    // Route-based notification behavior:
-    // - ALL => notifications OFF
-    // - Any specific route => notifications ON by default
-    // Route/day-based notification behavior:
-    // - Friday => notifications OFF
-    // - ALL => notifications OFF
-    // - Any specific route on other days => notifications ON by default
     LaunchedEffect(selectedRoute, isFriday) {
-        val isAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
-        vm.setNotificationsEnabled(!isFriday && !isAll)
+        val shouldEnableNotifications = when {
+            isSelectedAll -> false
+            isFriday -> isSelectedFridayRoute
+            else -> !isSelectedFridayRoute
+        }
+        vm.setNotificationsEnabled(shouldEnableNotifications)
     }
 
 // ✅ Always use FULL route list from VM (not filtered by Home)
     val routeOptions by vm.routeOptions.collectAsState()
+    val regularRouteOptions = remember(routeOptions) {
+        routeOptions.filterNot {
+            it.routeNo.trim().startsWith("F", ignoreCase = true)
+        }
+    }
+
+    val fridayRouteOptions = remember(routeOptions) {
+        routeOptions.filter {
+            it.routeNo.trim().startsWith("F", ignoreCase = true)
+        }
+    }
+
+    val selectedDailyRouteOption = remember(selectedRoute, regularRouteOptions) {
+        regularRouteOptions.firstOrNull { it.routeNo.equals(selectedRoute, ignoreCase = true) }
+            ?: regularRouteOptions.firstOrNull { it.routeNo.equals("ALL", ignoreCase = true) }
+            ?: RouteOption("ALL", "All Routes")
+    }
+
+    val selectedFridayRouteOption = remember(selectedRoute, fridayRouteOptions) {
+        fridayRouteOptions.firstOrNull { it.routeNo.equals(selectedRoute, ignoreCase = true) }
+    }
+
+    val dailyDropdownItems = remember(regularRouteOptions) {
+        regularRouteOptions.map {
+            RouteDropdownUi(
+                routeNo = it.routeNo.trim(),
+                label = it.label,
+                compactLabel = compactRouteOptionLabel(it.routeNo, it.label)
+            )
+        }
+    }
+
+    val fridayDropdownItems = remember(fridayRouteOptions) {
+        fridayRouteOptions.map {
+            RouteDropdownUi(
+                routeNo = it.routeNo.trim(),
+                label = it.label,
+                compactLabel = compactRouteOptionLabel(it.routeNo, it.label)
+            )
+        }
+    }
+
     val selectedRouteLabel by vm.selectedRouteLabel.collectAsState()
     val isSyncing by vm.isSyncing.collectAsState()
     val primaryText = if (dark) Color.White else MaterialTheme.colorScheme.onSurface
@@ -153,8 +201,11 @@ fun ProfileScreen(vm: HomeViewModel) {
         if (dark) Color.White.copy(alpha = 0.88f) else MaterialTheme.colorScheme.onSurfaceVariant
     val view = LocalView.current
     val notificationsEnabled by vm.notificationsEnabled.collectAsState()
-    val effectiveNotificationsEnabled =
-        notificationsEnabled && !isFriday && !selectedRoute.trim().equals("ALL", ignoreCase = true)
+    val effectiveNotificationsEnabled = notificationsEnabled && when {
+        isSelectedAll -> false
+        isFriday -> isSelectedFridayRoute
+        else -> !isSelectedFridayRoute
+    }
     val notifyLeadMinutes by vm.notifyLeadMinutes.collectAsState()
     val navBarBottomPad = with(LocalDensity.current) {
         val bottomPx = runCatching {
@@ -168,6 +219,7 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    var showProfileFeatureGuide by remember { mutableStateOf(false) }
 
     val showToggleMessage: (String) -> Unit = {
         scope.launch {
@@ -620,15 +672,17 @@ fun ProfileScreen(vm: HomeViewModel) {
         ) {
             val scrollState = rememberScrollState()
             val ctx = LocalContext.current
+            val routePrefs = remember {
+                ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
+            }
             val alarmGuardPrefs = remember {
                 ctx.getSharedPreferences("alarm_route_guard_prefs", Context.MODE_PRIVATE)
             }
-            // selectedRoute is available here
-            LaunchedEffect(selectedRoute) {
-                alarmGuardPrefs.edit()
-                    .putString("selected_route", selectedRoute.trim())
-                    .apply()
+
+            var selectedFridayRouteNoUi by rememberSaveable {
+                mutableStateOf(routePrefs.getString("selected_friday_route", "").orEmpty())
             }
+
             if (showReloadPopup || isSyncing) {
                 Dialog(
                     onDismissRequest = { },
@@ -677,11 +731,37 @@ fun ProfileScreen(vm: HomeViewModel) {
             ) {
                 Spacer(Modifier.height(28.dp))
 
-                Text(
-                    text = "Profile",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = primaryText
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Profile",
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = primaryText
+                    )
+
+                    IconButton(
+                        onClick = { showProfileFeatureGuide = true }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Info,
+                            contentDescription = "Show feature guide",
+                            tint = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+
+                if (showProfileFeatureGuide) {
+                    AppFeatureGuideDialog(
+                        guide = AppFeatureGuideContent.model,
+                        onClose = { showProfileFeatureGuide = false }
+                    )
+                }
 
                 // ---------------- Route Select ----------------
                 Card(
@@ -753,57 +833,162 @@ fun ProfileScreen(vm: HomeViewModel) {
                             }
                         }
 
-                        ExposedDropdownMenuBox(
-                            expanded = routeMenuExpanded,
-                            onExpandedChange = { routeMenuExpanded = !routeMenuExpanded }
+                        var dailyRouteMenuExpanded by rememberSaveable { mutableStateOf(false) }
+                        var fridayRouteMenuExpanded by rememberSaveable { mutableStateOf(false) }
+                        val selectedDailyRouteNo = remember(selectedDailyRouteOption.routeNo) { selectedDailyRouteOption.routeNo }
+
+
+                        LaunchedEffect(fridayDropdownItems) {
+                            if (fridayDropdownItems.isEmpty()) return@LaunchedEffect
+
+                            val savedFridayRoute = routePrefs.getString("selected_friday_route", "").orEmpty().trim()
+
+                            val resolvedFridayRoute = if (
+                                savedFridayRoute.isNotBlank() &&
+                                fridayDropdownItems.any { it.routeNo.equals(savedFridayRoute, ignoreCase = true) }
+                            ) {
+                                fridayDropdownItems.first {
+                                    it.routeNo.equals(savedFridayRoute, ignoreCase = true)
+                                }.routeNo
+                            } else {
+                                ""
+                            }
+
+                            if (selectedFridayRouteNoUi != resolvedFridayRoute) {
+                                selectedFridayRouteNoUi = resolvedFridayRoute
+                            }
+
+                            routePrefs.edit()
+                                .putString("selected_friday_route", resolvedFridayRoute)
+                                .apply()
+                        }
+
+                        LaunchedEffect(selectedRoute, isFriday, selectedFridayRouteNoUi) {
+                            val normalizedFridayRoute = selectedFridayRouteNoUi.trim().ifBlank { "ALL" }
+                            vm.setSelectedFridayRoute(normalizedFridayRoute)
+
+                            val guardedRoute = if (isFriday) {
+                                selectedFridayRouteNoUi.trim()
+                            } else {
+                                selectedRoute.trim()
+                            }
+
+                            alarmGuardPrefs.edit()
+                                .putString("selected_route", guardedRoute.ifBlank { "ALL" })
+                                .apply()
+                        }
+
+                        val effectiveNotificationRouteNo = remember(
+                            key1 = isFriday,
+                            key2 = selectedDailyRouteNo,
+                            key3 = selectedFridayRouteNoUi
                         ) {
-                            OutlinedTextField(
-                                value = selectedRouteLabel,
-                                onValueChange = {},
-                                readOnly = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .menuAnchor(type = MenuAnchorType.PrimaryNotEditable, enabled = true),
-                                label = { Text("Selected route", color = secondaryText) },
-                                trailingIcon = {
-                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = routeMenuExpanded)
-                                },
-                                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors()
+                            if (isFriday) {
+                                selectedFridayRouteNoUi.trim()
+                            } else {
+                                selectedDailyRouteNo.trim()
+                            }
+                        }
+
+
+                        val dailyDropdownUiItems = remember(dailyDropdownItems, selectedDailyRouteNo) {
+                            dailyDropdownItems.map { opt ->
+                                val isSelected = opt.routeNo == selectedDailyRouteNo
+                                Triple(opt, isSelected, opt.compactLabel)
+                            }
+                        }
+
+                        val fridayDropdownUiItems: List<Triple<RouteOption, Boolean, String>> = remember(
+                            fridayDropdownItems,
+                            selectedFridayRouteNoUi
+                        ) {
+                            val allItem: Triple<RouteOption, Boolean, String> = Triple(
+                                RouteOption(
+                                    routeNo = "ALL",
+                                    label = "No Friday route selected"
+                                ),
+                                selectedFridayRouteNoUi.isBlank() ||
+                                        selectedFridayRouteNoUi.equals("ALL", ignoreCase = true),
+                                "No Friday route selected"
                             )
 
-                            // ✅ Anchored menu (starts from the Selected route field)
-                            ExposedDropdownMenu(
-                                expanded = routeMenuExpanded,
-                                onDismissRequest = { routeMenuExpanded = false },
-                                modifier = Modifier
-                                    .exposedDropdownSize(true)
-                                    .heightIn(max = 420.dp)
-                                    .padding(bottom = navBarBottomPad)
-                                    .background(
-                                        color = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard,
-                                        shape = RoundedCornerShape(18.dp)
+                            val mappedItems: List<Triple<RouteOption, Boolean, String>> =
+                                fridayDropdownItems.map { opt ->
+                                    val routeOption = RouteOption(
+                                        routeNo = opt.routeNo,
+                                        label = opt.label
                                     )
-                            ) {
-                                val dailyRouteOptions = routeOptions.filter { opt ->
-                                    val rn = opt.routeNo.trim()
-                                    rn.isNotBlank() && !rn.startsWith("F", ignoreCase = true)
+
+                                    Triple(
+                                        routeOption,
+                                        selectedFridayRouteNoUi.equals(opt.routeNo, ignoreCase = true),
+                                        compactRouteOptionLabel(routeOption.routeNo, routeOption.label)
+                                    )
                                 }
 
-                                dailyRouteOptions.forEachIndexed { index, opt ->
+                            listOf(allItem) + mappedItems
+                        }
 
-                                    val isSelected = opt.routeNo == selectedRoute
+                        Text(
+                            text = "Daily Route",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = primaryText
+                        )
+
+                        ExposedDropdownMenuBox(
+                            expanded = dailyRouteMenuExpanded,
+                            onExpandedChange = { dailyRouteMenuExpanded = !dailyRouteMenuExpanded }
+                        ) {
+                            OutlinedTextField(
+                                value = selectedDailyRouteOption.label,
+                                onValueChange = {},
+                                readOnly = true,
+                                singleLine = true,
+                                modifier = Modifier
+                                    .menuAnchor()
+                                    .fillMaxWidth(),
+                                shape = RoundedCornerShape(18.dp),
+                                label = { Text("Select daily route") },
+                                trailingIcon = {
+                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = dailyRouteMenuExpanded)
+                                },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = if (dailyRouteMenuExpanded)
+                                        (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+                                    else
+                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                    focusedTextColor = primaryText,
+                                    unfocusedTextColor = primaryText,
+                                    focusedLabelColor = if (dark) Color.White else MaterialTheme.colorScheme.primary,
+                                    unfocusedLabelColor = if (dark) Color.White else secondaryText,
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent
+                                )
+                            )
+
+                            ExposedDropdownMenu(
+                                expanded = dailyRouteMenuExpanded,
+                                onDismissRequest = { dailyRouteMenuExpanded = false },
+                                modifier = Modifier
+                                    .exposedDropdownSize()
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .heightIn(max = 320.dp)
+                            ) {
+                                dailyDropdownUiItems.forEachIndexed { index, entry ->
+                                    val opt = entry.first
+                                    val isSelected = entry.second
+                                    val compactLabel = entry.third
 
                                     DropdownMenuItem(
+                                        interactionSource = remember { MutableInteractionSource() },
                                         contentPadding = PaddingValues(0.dp),
                                         text = {
                                             Box(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
                                                     .background(
-                                                        if (isSelected) MaterialTheme.colorScheme.primary.copy(
-                                                            alpha = 0.08f
-                                                        )
-                                                        else Color.Transparent,
+                                                        if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent,
                                                         shape = RoundedCornerShape(12.dp)
                                                     )
                                                     .padding(vertical = 10.dp, horizontal = 6.dp)
@@ -829,13 +1014,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                     Spacer(Modifier.size(2.dp))
 
                                                     Text(
-                                                        text = if (opt.routeNo.trim()
-                                                                .equals("ALL", ignoreCase = true)
-                                                        ) {
-                                                            "All"
-                                                        } else {
-                                                            opt.routeNo.trim()
-                                                        },
+                                                        text = opt.routeNo,
                                                         style = MaterialTheme.typography.labelLarge.copy(
                                                             fontWeight = FontWeight.SemiBold
                                                         ),
@@ -855,9 +1034,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             .height(18.dp)
                                                             .width(1.dp)
                                                             .background(
-                                                                MaterialTheme.colorScheme.onSurface.copy(
-                                                                    alpha = 0.18f
-                                                                ),
+                                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
                                                                 shape = RoundedCornerShape(1.dp)
                                                             )
                                                     )
@@ -865,14 +1042,9 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                     Spacer(Modifier.size(6.dp))
 
                                                     Text(
-                                                        text = compactRouteOptionLabel(
-                                                            opt.routeNo,
-                                                            opt.label
-                                                        ),
+                                                        text = compactLabel,
                                                         style = if (isSelected)
-                                                            MaterialTheme.typography.bodyLarge.copy(
-                                                                fontWeight = FontWeight.SemiBold
-                                                            )
+                                                            MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
                                                         else
                                                             MaterialTheme.typography.bodyLarge,
                                                         color = if (isSelected)
@@ -887,69 +1059,212 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             }
                                         },
                                         onClick = {
-                                            routeMenuExpanded = false
+                                            dailyRouteMenuExpanded = false
                                             vm.setSelectedRoute(opt.routeNo)
 
-                                            // Save selected road for LiveMap (Map tab)
                                             val rid = opt.routeNo.trim()
                                             val fullRoadText = buildString {
                                                 append(opt.routeNo.trim())
-                                                val compactLabel =
-                                                    compactRouteOptionLabel(opt.routeNo, opt.label)
-                                                if (compactLabel.isNotBlank()) {
+                                                if (opt.compactLabel.isNotBlank()) {
                                                     append(" — ")
-                                                    append(compactLabel)
+                                                    append(opt.compactLabel)
                                                 }
                                             }
                                             scope.launch {
                                                 SelectedRoadStore.save(ctx, rid, fullRoadText)
                                             }
+                                        }
+                                    )
 
-                                            // Route change hole sathe sathe old scheduled alarm cancel + old queue clear
-                                            val alarmManager =
-                                                ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-                                            val alarmIntent =
-                                                Intent(ctx, ScheduleAlarmReceiver::class.java)
-                                            val alarmPi = PendingIntent.getBroadcast(
-                                                ctx,
-                                                MainActivity.ALARM_REQ_CODE,
-                                                alarmIntent,
-                                                PendingIntent.FLAG_UPDATE_CURRENT or
-                                                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-                                                            PendingIntent.FLAG_IMMUTABLE else 0)
-                                            )
-                                            alarmManager.cancel(alarmPi)
-                                            NotificationManagerCompat.from(ctx)
-                                                .cancel(MainActivity.ALARM_REQ_CODE)
-                                            ctx.getSharedPreferences(
-                                                MainActivity.PREF_SCHEDULE_QUEUE,
-                                                Context.MODE_PRIVATE
-                                            ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "")
-                                                .apply()
+                                    if (index != dailyDropdownUiItems.lastIndex) {
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(horizontal = 14.dp),
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
-                                            // Friday or ALL keeps notifications OFF.
-                                            // Any specific route on other days defaults to ON.
-                                            val picked = opt.routeNo.trim()
-                                            alarmGuardPrefs.edit()
-                                                .putString("selected_route", picked)
-                                                .apply()
-                                            if (isFriday || picked.equals(
-                                                    "ALL",
-                                                    ignoreCase = true
-                                                )
+                        Spacer(Modifier.height(12.dp))
+
+                        Text(
+                            text = "Friday Route",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = primaryText
+                        )
+
+                        val selectedFridayRouteLabelUi = remember(fridayDropdownItems, selectedFridayRouteNoUi) {
+                            if (
+                                selectedFridayRouteNoUi.isBlank() ||
+                                selectedFridayRouteNoUi.equals("ALL", ignoreCase = true)
+                            ) {
+                                "No Friday route selected"
+                            } else {
+                                fridayDropdownItems.firstOrNull {
+                                    it.routeNo.equals(selectedFridayRouteNoUi, ignoreCase = true)
+                                }?.label ?: "No Friday route selected"
+                            }
+                        }
+
+                        ExposedDropdownMenuBox(
+                            expanded = fridayRouteMenuExpanded,
+                            onExpandedChange = { fridayRouteMenuExpanded = !fridayRouteMenuExpanded }
+                        ) {
+                            OutlinedTextField(
+                                value = selectedFridayRouteLabelUi,
+                                onValueChange = {},
+                                readOnly = true,
+                                singleLine = true,
+                                modifier = Modifier
+                                    .menuAnchor()
+                                    .fillMaxWidth(),
+                                shape = RoundedCornerShape(18.dp),
+                                label = { Text("Select Friday route") },
+                                trailingIcon = {
+                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = fridayRouteMenuExpanded)
+                                },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = if (fridayRouteMenuExpanded)
+                                        (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+                                    else
+                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                    focusedTextColor = primaryText,
+                                    unfocusedTextColor = primaryText,
+                                    focusedLabelColor = if (dark) Color.White else MaterialTheme.colorScheme.primary,
+                                    unfocusedLabelColor = if (dark) Color.White else secondaryText,
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent
+                                )
+                            )
+
+                            ExposedDropdownMenu(
+                                expanded = fridayRouteMenuExpanded,
+                                onDismissRequest = { fridayRouteMenuExpanded = false },
+                                modifier = Modifier
+                                    .exposedDropdownSize()
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .heightIn(max = 320.dp)
+                            ) {
+                                fridayDropdownUiItems.forEachIndexed { index, entry ->
+                                    val opt = entry.first
+                                    val isSelected = entry.second
+                                    val labelText = entry.third
+
+                                    DropdownMenuItem(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        contentPadding = PaddingValues(0.dp),
+                                        text = {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(
+                                                        if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent,
+                                                        shape = RoundedCornerShape(12.dp)
+                                                    )
+                                                    .padding(vertical = 10.dp, horizontal = 6.dp)
                                             ) {
-                                                vm.setNotificationsEnabled(false)
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier.width(26.dp),
+                                                        contentAlignment = Alignment.CenterStart
+                                                    ) {
+                                                        if (isSelected) {
+                                                            Icon(
+                                                                imageVector = Icons.Filled.Check,
+                                                                contentDescription = "Selected",
+                                                                tint = if (dark) MaterialTheme.colorScheme.secondary
+                                                                else MaterialTheme.colorScheme.primary
+                                                            )
+                                                        }
+                                                    }
+
+                                                    Spacer(Modifier.size(2.dp))
+
+                                                    Text(
+                                                        text = opt.routeNo.trim(),
+                                                        style = MaterialTheme.typography.labelLarge.copy(
+                                                            fontWeight = FontWeight.SemiBold
+                                                        ),
+                                                        color = if (isSelected)
+                                                            if (dark) MaterialTheme.colorScheme.secondary
+                                                            else MaterialTheme.colorScheme.primary
+                                                        else
+                                                            MaterialTheme.colorScheme.onSurface,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+
+                                                    Spacer(Modifier.size(6.dp))
+
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .height(18.dp)
+                                                            .width(1.dp)
+                                                            .background(
+                                                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
+                                                                shape = RoundedCornerShape(1.dp)
+                                                            )
+                                                    )
+
+                                                    Spacer(Modifier.size(6.dp))
+
+                                                    Text(
+                                                        text = labelText,
+                                                        style = if (isSelected)
+                                                            MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
+                                                        else
+                                                            MaterialTheme.typography.bodyLarge,
+                                                        color = if (isSelected)
+                                                            if (dark) MaterialTheme.colorScheme.secondary
+                                                            else MaterialTheme.colorScheme.primary
+                                                        else
+                                                            MaterialTheme.colorScheme.onSurface,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onClick = {
+                                            fridayRouteMenuExpanded = false
+
+                                            val normalizedFridayRoute = if (opt.routeNo.equals("ALL", ignoreCase = true)) {
+                                                ""
                                             } else {
-                                                vm.setNotificationsEnabled(true)
-                                                alarmSound5mEnabled = false
-                                                alertPrefs.edit()
-                                                    .putBoolean("alarm_sound_5m", false)
-                                                    .apply()
+                                                opt.routeNo.trim()
+                                            }
+
+                                            selectedFridayRouteNoUi = normalizedFridayRoute
+
+                                            routePrefs.edit()
+                                                .putString("selected_friday_route", normalizedFridayRoute)
+                                                .apply()
+
+                                            val fullRoadText = if (normalizedFridayRoute.isBlank()) {
+                                                "No Friday route selected"
+                                            } else {
+                                                buildString {
+                                                    append(opt.routeNo.trim())
+                                                    val compactLabel = labelText.trim()
+                                                    if (compactLabel.isNotBlank()) {
+                                                        append(" — ")
+                                                        append(compactLabel)
+                                                    }
+                                                }
+                                            }
+
+                                            scope.launch {
+                                                SelectedRoadStore.save(ctx, normalizedFridayRoute, fullRoadText)
                                             }
                                         }
                                     )
 
-                                    if (index != dailyRouteOptions.lastIndex) {
+                                    if (index != fridayDropdownUiItems.lastIndex) {
                                         HorizontalDivider(
                                             modifier = Modifier.padding(horizontal = 14.dp),
                                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
@@ -1024,6 +1339,26 @@ fun ProfileScreen(vm: HomeViewModel) {
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
+                        val notificationsBlockedByRoute = remember(
+                            isFriday,
+                            selectedRoute,
+                            selectedFridayRouteNoUi
+                        ) {
+                            val effectiveRoute = if (isFriday) {
+                                selectedFridayRouteNoUi.trim()
+                            } else {
+                                selectedRoute.trim()
+                            }
+
+                            effectiveRoute.isBlank() ||
+                                    effectiveRoute.equals("ALL", ignoreCase = true)
+                        }
+                        val canAutoEnableNotifications = remember(
+                            notificationsBlockedByRoute,
+                            effectiveNotificationsEnabled
+                        ) {
+                            !notificationsBlockedByRoute && !effectiveNotificationsEnabled
+                        }
                         Text(
                             text = "Features",
                             style = MaterialTheme.typography.titleMedium,
@@ -1077,13 +1412,14 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 )
                                 Text(
                                     text = when {
-                                        isFriday -> "Notifications stay OFF on Friday"
-                                        selectedRoute.trim().equals(
-                                            "ALL",
-                                            ignoreCase = true
-                                        ) -> "Notifications stay OFF when All routes is selected"
-
-                                        else -> "Turn this ON to enable notification, ringtone and vibration together"
+                                        notificationsBlockedByRoute -> {
+                                            if (isFriday) {
+                                                "Select a Friday route to enable Friday notifications"
+                                            } else {
+                                                "Select a daily route to enable notifications"
+                                            }
+                                        }
+                                        else -> "Turn this ON to enable notifications and vibration together. Ringtone is controlled separately below"
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = primaryText
@@ -1094,17 +1430,32 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 onCheckedChange = { enabled ->
                                     if (!enabled) {
                                         vm.setNotificationsEnabled(false)
-                                        alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
+                                        alarmSound5mEnabled = false
+                                        alarmVibrate5mEnabled = false
+                                        alertPrefs.edit()
+                                            .putBoolean("master_notifications_enabled", false)
+                                            .putBoolean("alarm_sound_5m", false)
+                                            .putBoolean("alarm_vibrate_5m", false)
+                                            .apply()
                                         showToggleMessage("Notifications turned off")
                                     } else {
-                                        if (isFriday || selectedRoute.trim().equals("ALL", ignoreCase = true)) {
+                                        if (notificationsBlockedByRoute) {
                                             vm.setNotificationsEnabled(false)
                                             alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
-                                            showToggleMessage("Select a specific route on a non-Friday to enable notifications")
+                                            showToggleMessage(
+                                                if (isFriday) "Select a Friday route to enable Friday notifications"
+                                                else "Select a daily route to enable notifications"
+                                            )
                                         } else if (hasNotificationPermissionNow()) {
                                             vm.setNotificationsEnabled(true)
-                                            alertPrefs.edit().putBoolean("master_notifications_enabled", true).apply()
-                                            showToggleMessage("Notifications enabled")
+                                            alarmVibrate5mEnabled = true
+                                            alarmSound5mEnabled = false
+                                            alertPrefs.edit()
+                                                .putBoolean("master_notifications_enabled", true)
+                                                .putBoolean("alarm_vibrate_5m", true)
+                                                .putBoolean("alarm_sound_5m", false)
+                                                .apply()
+                                            showToggleMessage("Notifications enabled. Vibration ON. Ringtone OFF")
                                         } else {
                                             vm.setNotificationsEnabled(false)
                                             alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
@@ -1135,20 +1486,35 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         }
                                     }
                                 },
-                                enabled = !isFriday && !selectedRoute.trim().equals("ALL", ignoreCase = true),
+                                enabled = true,
                                 colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                             )
                         }
 
-                        if (isFriday) {
+                        LaunchedEffect(
+                            canAutoEnableNotifications,
+                            isFriday,
+                            selectedRoute,
+                            selectedFridayRouteNoUi
+                        ) {
+                            if (canAutoEnableNotifications && hasNotificationPermissionNow()) {
+                                vm.setNotificationsEnabled(true)
+                                alarmVibrate5mEnabled = true
+                                alarmSound5mEnabled = false
+                                alertPrefs.edit()
+                                    .putBoolean("master_notifications_enabled", true)
+                                    .putBoolean("alarm_vibrate_5m", true)
+                                    .putBoolean("alarm_sound_5m", false)
+                                    .apply()
+                            }
+                        }
+
+                        if (notificationsBlockedByRoute) {
                             Text(
-                                text = "Notifications stay off on Friday.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = secondaryText
-                            )
-                        } else if (selectedRoute.trim().equals("ALL", ignoreCase = true)) {
-                            Text(
-                                text = "Select a specific route to turn notifications on.",
+                                text = if (isFriday)
+                                    "Friday notifications use the Friday route selection."
+                                else
+                                    "Notifications use the daily route selection on normal days.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = secondaryText
                             )
@@ -1264,7 +1630,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 .apply()
                                             showToggleMessage(if (it) "Ringtone ON" else "Ringtone OFF")
                                         },
-                                        enabled = notificationsEnabled,
+                                        enabled = effectiveNotificationsEnabled,
                                         colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                                     )
                                 }
@@ -1413,7 +1779,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 .apply()
                                             showToggleMessage(if (it) "Vibration ON" else "Vibration OFF")
                                         },
-                                        enabled = notificationsEnabled,
+                                        enabled = effectiveNotificationsEnabled,
                                         colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                                     )
                                 }
@@ -2232,6 +2598,92 @@ fun ProfileScreen(vm: HomeViewModel) {
         }
     }
 }
+
+@Immutable
+private data class RouteDropdownUi(
+    val routeNo: String,
+    val label: String,
+    val compactLabel: String
+)
+
+@Composable
+private fun RouteDropdownMenuItem(
+    opt: RouteDropdownUi,
+    isSelected: Boolean,
+    dark: Boolean,
+    onClick: () -> Unit
+) {
+    val selectedColor = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+    val bgColor = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent
+
+    DropdownMenuItem(
+        contentPadding = PaddingValues(0.dp),
+        interactionSource = remember { MutableInteractionSource() },
+        text = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(bgColor, shape = RoundedCornerShape(12.dp))
+                    .padding(vertical = 10.dp, horizontal = 6.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier.width(26.dp),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = "Selected",
+                                tint = selectedColor
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.size(2.dp))
+
+                    Text(
+                        text = opt.routeNo,
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                        color = if (isSelected) selectedColor else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Spacer(Modifier.size(6.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .height(18.dp)
+                            .width(1.dp)
+                            .background(
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
+                                shape = RoundedCornerShape(1.dp)
+                            )
+                    )
+
+                    Spacer(Modifier.size(6.dp))
+
+                    Text(
+                        text = opt.compactLabel,
+                        style = if (isSelected) {
+                            MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
+                        } else {
+                            MaterialTheme.typography.bodyLarge
+                        },
+                        color = if (isSelected) selectedColor else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        },
+        onClick = onClick
+    )
+}
     private fun compactRouteEndpoints(label: String): String {
         val clean = label.trim()
         if (clean.isBlank()) return ""
@@ -2248,23 +2700,29 @@ fun ProfileScreen(vm: HomeViewModel) {
         }
     }
 
-    fun compactRouteOptionLabel(routeNo: String, label: String): String {
-        if (routeNo.trim().equals("ALL", ignoreCase = true)) {
-            return "All routes"
-        }
+fun compactRouteOptionLabel(routeNo: String, label: String): String {
+    val routeNoTrimmed = routeNo.trim()
 
-        val compact = compactRouteEndpoints(label)
-        val routeNoTrimmed = routeNo.trim()
-
-        return compact
-            .replace(
-                Regex(
-                    "\\s*\\(${Regex.escape(routeNoTrimmed)}\\)\\s*$",
-                    RegexOption.IGNORE_CASE
-                ), ""
-            )
-            .trim()
+    if (routeNoTrimmed.equals("ALL", ignoreCase = true)) {
+        return "All routes"
     }
+
+    val compact = compactRouteEndpoints(label)
+
+    // ⚡ Regex remove → ultra fast string check
+    val suffix1 = " ($routeNoTrimmed)"
+    val suffix2 = "($routeNoTrimmed)"
+
+    return when {
+        compact.endsWith(suffix1, ignoreCase = true) ->
+            compact.dropLast(suffix1.length).trim()
+
+        compact.endsWith(suffix2, ignoreCase = true) ->
+            compact.dropLast(suffix2.length).trim()
+
+        else -> compact
+    }
+}
 
 
 // Compatibility: older Material3 versions may not include ColorScheme.surfaceColorAtElevation

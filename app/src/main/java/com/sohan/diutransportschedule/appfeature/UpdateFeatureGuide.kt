@@ -12,16 +12,28 @@ object AppUpdateFeatureGuideContent {
         subtitle = "Here’s a quick look at the latest improvements",
         items = listOf(
             AppFeatureGuideItem(
-                title = "Update alerts",
-                description = "Whenever the schedule changes, you’ll see an update message with the exact date and time of the update."
+                title = "Separate daily and Friday route selection",
+                description = "You can now keep different route selections for regular days and Friday, so each day follows its own saved route."
             ),
             AppFeatureGuideItem(
-                title = "Cleaner feature guide flow",
-                description = "First install welcome guide and app update guide are now handled separately for a better experience."
+                title = "Friday-only reminder behavior",
+                description = "Friday reminders now use only the Friday route selection, while the rest of the week continues to follow the daily route."
             ),
             AppFeatureGuideItem(
-                title = "Same familiar design",
-                description = "The update guide uses the same card design and bottom-sheet style, so everything feels consistent."
+                title = "Friday ALL option",
+                description = "An ALL option is now available in the Friday route list, making it easier to clear Friday route selection when needed."
+            ),
+            AppFeatureGuideItem(
+                title = "Manual dismiss notification panel",
+                description = "After alert sound or vibration stops, the notification stays in the phone’s notification panel until you remove it manually."
+            ),
+            AppFeatureGuideItem(
+                title = "Volume and power button alert stop",
+                description = "While an alert is running, pressing the volume or power button can stop the sound or vibration without removing the notification."
+            ),
+            AppFeatureGuideItem(
+                title = "Smoother map and profile experience",
+                description = "Profile route controls, tab switching, map movement, compass behavior, and feature guide interactions have been refined for a smoother overall experience."
             )
         )
     )

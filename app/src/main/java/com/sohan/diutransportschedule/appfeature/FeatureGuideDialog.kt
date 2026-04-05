@@ -6,10 +6,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,10 +20,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
@@ -54,6 +52,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -64,6 +63,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.PaddingValues
 
 
 data class AppFeatureGuideItem(
@@ -86,7 +87,7 @@ fun AppFeatureGuideDialog(
     val configuration = LocalConfiguration.current
     val listState = rememberLazyListState()
 
-    val dragThresholdPx = 28f
+    val expandDragThresholdPx = 14f
 
     val shouldAutoExpand by remember {
         derivedStateOf {
@@ -95,10 +96,10 @@ fun AppFeatureGuideDialog(
     }
 
     val collapsedHeight = remember(configuration.screenHeightDp) {
-        (configuration.screenHeightDp * 0.48f).dp
+        ((configuration.screenHeightDp * 0.52f).dp).coerceIn(360.dp, 560.dp)
     }
     val expandedHeight = remember(configuration.screenHeightDp) {
-        (configuration.screenHeightDp * 0.72f).dp
+        ((configuration.screenHeightDp * 0.84f).dp).coerceIn(520.dp, 820.dp)
     }
 
     var isExpanded by remember { mutableStateOf(false) }
@@ -134,10 +135,37 @@ fun AppFeatureGuideDialog(
         }
     }
 
-    val sheetColor = MaterialTheme.colorScheme.surface
-    val headerChipColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-    val closeButtonColor = MaterialTheme.colorScheme.surfaceContainerHighest
-    val scrimColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.42f)
+    LaunchedEffect(listState.isScrollInProgress, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
+        if (
+            !isExpanded &&
+            listState.isScrollInProgress &&
+            (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 2)
+        ) {
+            isExpanded = true
+        }
+    }
+
+    val colorScheme = MaterialTheme.colorScheme
+    val surfaceColor = colorScheme.surface
+    val surfaceBrightness = (surfaceColor.red * 0.299f) + (surfaceColor.green * 0.587f) + (surfaceColor.blue * 0.114f)
+    val isDarkTheme = surfaceBrightness < 0.5f
+
+    val sheetColor = if (isDarkTheme) {
+        colorScheme.surfaceContainerLow
+    } else {
+        colorScheme.surface
+    }
+    val headerChipColor = if (isDarkTheme) {
+        colorScheme.secondary.copy(alpha = 0.18f)
+    } else {
+        colorScheme.primary.copy(alpha = 0.10f)
+    }
+    val closeButtonColor = if (isDarkTheme) {
+        colorScheme.surfaceContainerHighest.copy(alpha = 0.92f)
+    } else {
+        colorScheme.surfaceContainerHigh
+    }
+    val scrimColor = colorScheme.scrim.copy(alpha = if (isDarkTheme) 0.62f else 0.32f)
 
     Dialog(
         onDismissRequest = onClose,
@@ -161,7 +189,10 @@ fun AppFeatureGuideDialog(
         ) {
             Surface(
                 modifier = Modifier
-                    .requiredWidth(configuration.screenWidthDp.dp)
+                    .fillMaxWidth()
+                    .wrapContentWidth(align = Alignment.CenterHorizontally)
+                    .widthIn(max = 640.dp)
+                    .heightIn(min = collapsedHeight, max = expandedHeight)
                     .height(sheetHeight)
                     .graphicsLayer {
                         translationY = offsetFraction * sheetHeight.toPx()
@@ -182,17 +213,22 @@ fun AppFeatureGuideDialog(
                         .background(sheetColor)
                         .systemBarsPadding()
                         .imePadding()
+                        .padding(horizontal = 8.dp)
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(top = 10.dp, bottom = 8.dp)
-                            .pointerInput(isExpanded) {
+                            .pointerInput(isExpanded, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
                                 detectVerticalDragGestures(
                                     onVerticalDrag = { _, dragAmount ->
-                                        if (dragAmount < -10f) {
+                                        if (dragAmount < -6f) {
                                             isExpanded = true
-                                        } else if (dragAmount > 10f && listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0) {
+                                        } else if (
+                                            dragAmount > 10f &&
+                                            listState.firstVisibleItemIndex == 0 &&
+                                            listState.firstVisibleItemScrollOffset == 0
+                                        ) {
                                             isExpanded = false
                                         }
                                     }
@@ -236,7 +272,7 @@ fun AppFeatureGuideDialog(
                                     Text(
                                         text = "✦",
                                         style = MaterialTheme.typography.titleMedium,
-                                        color = MaterialTheme.colorScheme.onSurface,
+                                        color = if (isDarkTheme) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Bold,
                                         textAlign = TextAlign.Center
                                     )
@@ -294,22 +330,31 @@ fun AppFeatureGuideDialog(
                         state = listState,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .weight(1f, fill = true)
                             .heightIn(min = 120.dp, max = expandedHeight)
-                            .draggable(
-                                orientation = Orientation.Vertical,
-                                state = rememberDraggableState { delta ->
-                                    if (!isExpanded && delta < -dragThresholdPx) {
-                                        isExpanded = true
+                            .pointerInput(isExpanded, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
+                                detectVerticalDragGestures(
+                                    onVerticalDrag = { _, dragAmount ->
+                                        if (!isExpanded && dragAmount < -expandDragThresholdPx) {
+                                            isExpanded = true
+                                        } else if (
+                                            isExpanded &&
+                                            dragAmount > 14f &&
+                                            listState.firstVisibleItemIndex == 0 &&
+                                            listState.firstVisibleItemScrollOffset == 0
+                                        ) {
+                                            isExpanded = false
+                                        }
                                     }
-                                },
-                                onDragStopped = {
-                                    if (!isExpanded && shouldAutoExpand) {
-                                        isExpanded = true
-                                    }
-                                }
-                            )
+                                )
+                            }
                             .padding(horizontal = 6.dp),
-                        contentPadding = WindowInsets.navigationBars.asPaddingValues(),
+                        contentPadding = PaddingValues(
+                            start = 0.dp,
+                            top = 0.dp,
+                            end = 0.dp,
+                            bottom = 24.dp
+                        ),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         item { Spacer(modifier = Modifier.height(2.dp)) }
@@ -354,18 +399,48 @@ private fun FeatureGuideItemCard(
     index: Int,
     item: AppFeatureGuideItem
 ) {
+    val colorScheme = MaterialTheme.colorScheme
+    val surfaceColor = colorScheme.surface
+    val surfaceBrightness = (surfaceColor.red * 0.299f) + (surfaceColor.green * 0.587f) + (surfaceColor.blue * 0.114f)
+    val isDarkTheme = surfaceBrightness < 0.5f
+    val cardContainerColor = if (isDarkTheme) {
+        colorScheme.surfaceContainerHigh
+    } else {
+        colorScheme.surface
+    }
+    val cardBorderColor = if (isDarkTheme) {
+        colorScheme.outlineVariant.copy(alpha = 0.18f)
+    } else {
+        colorScheme.outlineVariant.copy(alpha = 0.16f)
+    }
+    val indexChipColor = if (isDarkTheme) {
+        colorScheme.secondary.copy(alpha = 0.16f)
+    } else {
+        colorScheme.primary.copy(alpha = 0.10f)
+    }
+    val indexTextColor = if (isDarkTheme) {
+        colorScheme.secondary
+    } else {
+        colorScheme.primary
+    }
+    val accentLineColor = if (isDarkTheme) {
+        colorScheme.secondary.copy(alpha = 0.24f)
+    } else {
+        colorScheme.primary.copy(alpha = 0.22f)
+    }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 1.dp)
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.10f),
+                color = cardBorderColor,
                 shape = RoundedCornerShape(22.dp)
             ),
         shape = RoundedCornerShape(22.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        tonalElevation = 4.dp,
-        shadowElevation = 6.dp
+        color = cardContainerColor,
+        tonalElevation = if (isDarkTheme) 1.dp else 2.dp,
+        shadowElevation = if (isDarkTheme) 0.dp else 3.dp
     ) {
         Column(
             modifier = Modifier
@@ -378,7 +453,7 @@ private fun FeatureGuideItemCard(
             ) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                    color = indexChipColor,
                     tonalElevation = 0.dp
                 ) {
                     Box(
@@ -391,7 +466,7 @@ private fun FeatureGuideItemCard(
                             text = index.toString(),
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
+                            color = indexTextColor
                         )
                     }
                 }
@@ -413,7 +488,7 @@ private fun FeatureGuideItemCard(
                             .height(3.dp)
                             .fillMaxWidth(0.16f)
                             .clip(RoundedCornerShape(999.dp))
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+                            .background(accentLineColor)
                     )
                 }
             }
