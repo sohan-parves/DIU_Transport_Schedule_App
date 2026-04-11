@@ -4,6 +4,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -110,6 +112,7 @@ import androidx.core.content.ContextCompat
 import com.sohan.diutransportschedule.MainActivity
 import com.sohan.diutransportschedule.ui.checkAndSyncNoticesFromMeta
 import android.content.IntentFilter
+import com.sohan.diutransportschedule.sync.ACTION_NEW_NOTICE
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
 import android.Manifest
@@ -122,11 +125,24 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.geometry.Offset
+import android.util.Log
+import com.google.firebase.messaging.FirebaseMessaging
+import java.util.Date
 
 // --- Notice notification channels ---
 private const val NOTICE_CHANNEL_ID = "admin_notices_v2"
 private const val PREF_FIRST_INSTALL_SYNC = "first_install_sync"
 private const val KEY_FIRST_INSTALL_SYNC_DONE = "first_install_sync_done"
+
+private const val PREF_ADMIN_MESSAGE_POPUP = "admin_message_popup"
+private const val KEY_ADMIN_MESSAGE_ID = "id"
+private const val KEY_ADMIN_MESSAGE_TITLE = "title"
+private const val KEY_ADMIN_MESSAGE_BODY = "body"
+private const val KEY_ADMIN_MESSAGE_TS = "ts"
+private const val KEY_ADMIN_MESSAGE_LAST_SHOWN_ID = "last_shown_id"
+
+private const val PREF_ADMIN_MESSAGE_FIRESTORE_GATE = "admin_message_firestore_gate"
+private const val KEY_ADMIN_MESSAGE_LAST_SHOWN_DOC_ID = "last_shown_doc_id"
 
 
 
@@ -145,13 +161,26 @@ private fun markFirstInstallSyncDone(context: Context) {
 // import androidx.compose.foundation.isSystemInDarkTheme
 /* ------------------ ENTRY (PUBLIC) ------------------ */
 
+private fun formatShortNoticeDateMs(ms: Long): String {
+    if (ms <= 0L) return ""
+    return try {
+        Instant.ofEpochMilli(ms)
+            .atZone(ZoneId.systemDefault())
+            .toLocalDate()
+            .format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH))
+    } catch (_: Throwable) {
+        ""
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class)
 @Composable
 
 
 fun HomeScreen(
     vm: HomeViewModel,
-    pad: PaddingValues
+    pad: PaddingValues,
+    onOpenNotice: () -> Unit = {}
 ) {
     // ---- VM state ----
     val selectedRoute by vm.selectedRoute.collectAsState()
@@ -169,28 +198,117 @@ fun HomeScreen(
 
     var showUpdateOverlay by remember { mutableStateOf(false) }
     var updatePopupDateTime by rememberSaveable { mutableStateOf("") }
+    var updatePopupTitle by rememberSaveable { mutableStateOf("") }
+    var updatePopupBody by rememberSaveable { mutableStateOf("") }
 
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val noticeDb = remember { FirebaseFirestore.getInstance() }
-
-    fun syncNoticeCacheSilently() {
-        checkAndSyncNoticesFromMeta(
-            ctx = ctx,
-            db = noticeDb,
-            onDone = {},
-            onError = {}
-        )
-    }
 
     var showNoticeAlert by remember { mutableStateOf(false) }
     var noticeTitle by remember { mutableStateOf("") }
     var noticeBody by remember { mutableStateOf("") }
     var noticeDate by remember { mutableStateOf("") }
 
+    // ✅ If an admin push arrives while app is backgrounded, show popup once when Home opens.
+    LaunchedEffect(ctx) {
+        try {
+            val prefs = ctx.getSharedPreferences(PREF_ADMIN_MESSAGE_POPUP, Context.MODE_PRIVATE)
+            val id = prefs.getString(KEY_ADMIN_MESSAGE_ID, "").orEmpty()
+            val lastShown = prefs.getString(KEY_ADMIN_MESSAGE_LAST_SHOWN_ID, "").orEmpty()
+            if (id.isNotBlank() && id != lastShown) {
+                val title = prefs.getString(KEY_ADMIN_MESSAGE_TITLE, "").orEmpty().ifBlank { "Update" }
+                val body = prefs.getString(KEY_ADMIN_MESSAGE_BODY, "").orEmpty()
+                val ts = prefs.getLong(KEY_ADMIN_MESSAGE_TS, 0L)
+                if (body.isNotBlank()) {
+                    updatePopupTitle = title
+                    updatePopupBody = body
+                    updatePopupDateTime = if (ts > 0L) {
+                        java.text.SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(Date(ts))
+                    } else {
+                        java.text.SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(Date())
+                    }
+                    showUpdateOverlay = true
+                    prefs.edit().putString(KEY_ADMIN_MESSAGE_LAST_SHOWN_ID, id).apply()
+                }
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    // ✅ New notice from FCM: show Home popup once (cold start / same session as admin message prefs).
+    LaunchedEffect(Unit) {
+        val pending = readPendingNoticeHomePopup(ctx) ?: return@LaunchedEffect
+        noticeTitle = pending.title
+        noticeBody = pending.body
+        noticeDate = formatShortNoticeDateMs(pending.dateMs)
+        showNoticeAlert = true
+        markNoticeHomePopupShown(ctx, pending.id)
+    }
+
+    // While Home is open, `LaunchedEffect(Unit)` does not re-run; listen for new push prefs.
+    DisposableEffect(ctx) {
+        val prefs = ctx.getSharedPreferences(PREF_NOTICE_HOME_POPUP, Context.MODE_PRIVATE)
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key != KEY_LAST_PUSH_NOTICE_ID) return@OnSharedPreferenceChangeListener
+            Handler(Looper.getMainLooper()).post {
+                val pending = readPendingNoticeHomePopup(ctx) ?: return@post
+                noticeTitle = pending.title
+                noticeBody = pending.body
+                noticeDate = formatShortNoticeDateMs(pending.dateMs)
+                showNoticeAlert = true
+                markNoticeHomePopupShown(ctx, pending.id)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+
+    // ✅ FCM fallback: if Firebase Console sends notification-payload (service may not receive in background),
+    // show the latest admin message from Firestore once when Home opens.
+    LaunchedEffect(ctx) {
+        try {
+            val gate = ctx.getSharedPreferences(PREF_ADMIN_MESSAGE_FIRESTORE_GATE, Context.MODE_PRIVATE)
+            val lastShownDocId = gate.getString(KEY_ADMIN_MESSAGE_LAST_SHOWN_DOC_ID, "").orEmpty()
+
+            val snap = noticeDb
+                .collection("admin_messages")
+                .orderBy("createdAt", Query.Direction.DESCENDING)
+                .limit(1)
+                .get()
+                .await()
+
+            val doc = snap.documents.firstOrNull() ?: return@LaunchedEffect
+            val docId = doc.id
+            if (docId.isBlank() || docId == lastShownDocId) return@LaunchedEffect
+
+            val t = doc.getString("title").orEmpty().ifBlank { "Update" }
+            val b = doc.getString("body").orEmpty()
+            if (b.isBlank()) return@LaunchedEffect
+
+            val ts = doc.getTimestamp("createdAt")?.toDate()?.time ?: System.currentTimeMillis()
+
+            updatePopupTitle = t
+            updatePopupBody = b
+            updatePopupDateTime = java.text.SimpleDateFormat(
+                "dd MMM yyyy • hh:mm a",
+                Locale.ENGLISH
+            ).format(java.util.Date(ts))
+            showUpdateOverlay = true
+
+            gate.edit().putString(KEY_ADMIN_MESSAGE_LAST_SHOWN_DOC_ID, docId).apply()
+        } catch (_: Throwable) {
+        }
+    }
+
     // ✅ Auto-open update popup when update info arrives
     LaunchedEffect(showUpdate, updateMessage) {
         if (showUpdate && updateMessage.isNotBlank()) {
+            val raw = updateMessage.trim()
+            val parts = raw.split("\n", limit = 2)
+            val fallbackTitle = parts.firstOrNull().orEmpty().trim().ifBlank { "Update" }
+            val fallbackBody = parts.getOrNull(1)?.trim().orEmpty().ifBlank { raw }
+
             val createdAtText = try {
                 val snap = noticeDb
                     .collection("admin_messages")
@@ -199,13 +317,22 @@ fun HomeScreen(
                     .get()
                     .await()
 
-                val ts = snap.documents.firstOrNull()?.getTimestamp("createdAt")
+                val latestDoc = snap.documents.firstOrNull()
+                updatePopupTitle = latestDoc?.getString("title").orEmpty().ifBlank { fallbackTitle }
+                updatePopupBody = latestDoc?.getString("body").orEmpty().ifBlank { fallbackBody }
+
+                val ts = latestDoc?.getTimestamp("createdAt")
                 ts?.toDate()?.let {
                     java.text.SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(it)
                 }.orEmpty()
             } catch (_: Throwable) {
+                updatePopupTitle = fallbackTitle
+                updatePopupBody = fallbackBody
                 ""
             }
+
+            if (updatePopupTitle.isBlank()) updatePopupTitle = fallbackTitle
+            if (updatePopupBody.isBlank()) updatePopupBody = fallbackBody
 
             updatePopupDateTime = createdAtText
             showUpdateOverlay = true
@@ -218,40 +345,39 @@ fun HomeScreen(
     LaunchedEffect(homeInitialRefreshDone) {
         if (!homeInitialRefreshDone) {
             homeInitialRefreshDone = true
-
-            if (!isFirstInstallSyncDone(ctx)) {
-                vm.refresh(
-                    showBannerIfUpdated = true,
-                    allowDataRead = true,
-                    context = ctx,
-                    isManualRefresh = false
-                )
+            val firstInstallSync = !isFirstInstallSyncDone(ctx)
+            vm.refresh(
+                showBannerIfUpdated = true,
+                allowDataRead = firstInstallSync,
+                context = ctx,
+                isManualRefresh = false
+            )
+            if (firstInstallSync) {
                 markFirstInstallSyncDone(ctx)
-            } else {
-                vm.refresh(
-                    showBannerIfUpdated = true,
-                    allowDataRead = true,
-                    context = ctx,
-                    isManualRefresh = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        FirebaseMessaging.getInstance()
+            .subscribeToTopic("diu_admin")
+            .addOnCompleteListener { task ->
+                Log.d(
+                    "USER_FCM",
+                    "Subscribed to diu_admin = ${task.isSuccessful}"
                 )
             }
-        }
-    }
 
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_START) {
-                if (!isInitialNoticeSyncDone(ctx) || canCheckNoticeVersionNow(ctx)) {
-                    syncNoticeCacheSilently()
-                }
+        FirebaseMessaging.getInstance()
+            .subscribeToTopic("diu_transport")
+            .addOnCompleteListener { task ->
+                Log.d(
+                    "USER_FCM",
+                    "Subscribed to diu_transport = ${task.isSuccessful}"
+                )
             }
-        }
-
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
     }
+
 
     // Keep VM query in sync (VM items depends on it)
     LaunchedEffect(query) {
@@ -260,15 +386,56 @@ fun HomeScreen(
     }
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+    var lastManualPullRefreshAt by rememberSaveable { mutableStateOf(0L) }
     val pullRefreshState = rememberPullRefreshState(
         refreshing = syncing,
         onRefresh = {
+            if (syncing) return@rememberPullRefreshState
+            val now = System.currentTimeMillis()
+            if (now - lastManualPullRefreshAt < 3000L) return@rememberPullRefreshState
+            lastManualPullRefreshAt = now
             vm.refresh(
                 showBannerIfUpdated = true,
                 allowDataRead = true,
                 context = ctx,
                 isManualRefresh = true
             )
+
+            // Same 1-hour manual gate as Notice screen: meta version check; cache updates shared with Notice tab.
+            val noticeManualPrefs = ctx.getSharedPreferences(PREF_NOTICES, Context.MODE_PRIVATE)
+            val lastNoticeManualMs = noticeManualPrefs.getLong(KEY_LAST_MANUAL_NOTICE_REFRESH_MS, 0L)
+            if (now - lastNoticeManualMs > 60 * 60 * 1000L) {
+                checkAndSyncNoticesFromMeta(
+                    ctx = ctx,
+                    db = noticeDb,
+                    forceBypass = false,
+                    onVersionCompared = { versionChanged ->
+                        if (versionChanged) {
+                            Handler(Looper.getMainLooper()).post {
+                                val latest = readCachedNotices(ctx).firstOrNull() ?: return@post
+                                noticeTitle = latest.title.ifBlank { "Notice" }
+                                noticeBody = latest.body
+                                noticeDate = try {
+                                    val ms = maxOf(latest.releaseAtMs, latest.createdAtMs)
+                                    Instant.ofEpochMilli(ms)
+                                        .atZone(ZoneId.systemDefault())
+                                        .toLocalDate()
+                                        .format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH))
+                                } catch (_: Throwable) {
+                                    ""
+                                }
+                                showNoticeAlert = true
+                            }
+                        }
+                    },
+                    onDone = {
+                        noticeManualPrefs.edit()
+                            .putLong(KEY_LAST_MANUAL_NOTICE_REFRESH_MS, System.currentTimeMillis())
+                            .apply()
+                    },
+                    onError = { }
+                )
+            }
         },
         refreshThreshold = 120.dp,
         refreshingOffset = 88.dp
@@ -277,11 +444,88 @@ fun HomeScreen(
     // Expanded state per card
     val expandedIds = rememberSaveable { mutableStateOf(setOf<String>()) }
 
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            val pending = readPendingNoticeHomePopup(ctx) ?: return@LifecycleEventObserver
+            noticeTitle = pending.title
+            noticeBody = pending.body
+            noticeDate = formatShortNoticeDateMs(pending.dateMs)
+            showNoticeAlert = true
+            markNoticeHomePopupShown(ctx, pending.id)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // Low-read Notice updates: listen only to meta/notices.version
     // ✅ Notice popup + notification when a NEW notice is published
     // We listen only to the latest notice (limit 1). This is a single-document listener.
-    DisposableEffect(Unit) {
-        onDispose { }
+    DisposableEffect(ctx) {
+        val noticeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ACTION_NEW_NOTICE) return
+                val idExtra = intent.getStringExtra("id").orEmpty()
+                val titleExtra = intent.getStringExtra("title").orEmpty().ifBlank { "Notice" }
+                val bodyExtra = intent.getStringExtra("body").orEmpty()
+                val createdAtMs = intent.getLongExtra("createdAtMs", 0L)
+                val releaseAtMs = intent.getLongExtra("releaseAtMs", 0L)
+                val dateMs = maxOf(createdAtMs, releaseAtMs)
+
+                noticeTitle = titleExtra
+                noticeBody = bodyExtra
+                noticeDate = formatShortNoticeDateMs(dateMs)
+                if (bodyExtra.isNotBlank()) {
+                    showNoticeAlert = true
+                    if (idExtra.isNotBlank()) {
+                        markNoticeHomePopupShown(ctx, idExtra)
+                    }
+                }
+            }
+        }
+
+        val adminMessageReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != com.sohan.diutransportschedule.sync.AdminMessagingService.ACTION_NEW_ADMIN_MESSAGE) return
+                val titleExtra = intent.getStringExtra("title").orEmpty().ifBlank { "Update" }
+                val bodyExtra = intent.getStringExtra("body").orEmpty()
+                if (bodyExtra.isBlank()) return
+                Handler(Looper.getMainLooper()).post {
+                    updatePopupTitle = titleExtra
+                    updatePopupBody = bodyExtra
+                    updatePopupDateTime = java.text.SimpleDateFormat(
+                        "dd MMM yyyy • hh:mm a",
+                        Locale.ENGLISH
+                    ).format(java.util.Date())
+                    showUpdateOverlay = true
+                    vm.showInlineUpdateFromPush(titleExtra, bodyExtra)
+                }
+            }
+        }
+
+        val noticeFilter = IntentFilter(ACTION_NEW_NOTICE)
+        val adminFilter = IntentFilter(com.sohan.diutransportschedule.sync.AdminMessagingService.ACTION_NEW_ADMIN_MESSAGE)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ctx.registerReceiver(noticeReceiver, noticeFilter, Context.RECEIVER_NOT_EXPORTED)
+            ctx.registerReceiver(adminMessageReceiver, adminFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            ctx.registerReceiver(noticeReceiver, noticeFilter)
+            @Suppress("DEPRECATION")
+            ctx.registerReceiver(adminMessageReceiver, adminFilter)
+        }
+
+        onDispose {
+            try {
+                ctx.unregisterReceiver(noticeReceiver)
+            } catch (_: Throwable) {
+            }
+            try {
+                ctx.unregisterReceiver(adminMessageReceiver)
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     Box(
@@ -376,10 +620,10 @@ fun HomeScreen(
         )
 
 
-        if (showUpdateOverlay && updateMessage.isNotBlank()) {
+        if (showUpdateOverlay && updatePopupBody.isNotBlank()) {
             FullUpdateOverlay(
-                title = "Update",
-                message = updateMessage,
+                title = updatePopupTitle.ifBlank { "Update" },
+                message = updatePopupBody,
                 dateTimeText = updatePopupDateTime,
                 appDark = appDark,
                 onClose = { showUpdateOverlay = false },
@@ -391,22 +635,17 @@ fun HomeScreen(
         }
 
 
-        if (showNoticeAlert && noticeTitle.isNotBlank() && noticeBody.isNotBlank()) {
+        if (showNoticeAlert && noticeBody.isNotBlank()) {
             val dark = appDark
             val btnColor = if (dark) Color.White else Color.Black
-
-            // show only a short preview in popup
-            val preview = remember(noticeBody) {
-                val clean = noticeBody.trim()
-                if (clean.length <= 220) clean else clean.take(220).trimEnd() + "…"
-            }
+            val dialogTitle = noticeTitle.ifBlank { "Notice" }
 
             AlertDialog(
                 onDismissRequest = { showNoticeAlert = false },
                 title = {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(
-                            text = noticeTitle,
+                            text = dialogTitle,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -420,15 +659,24 @@ fun HomeScreen(
                     }
                 },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = preview,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
+                    Text(
+                        text = "পুরো নোটিশ পড়তে Notice ট্যাবে যান।",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 },
                 confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showNoticeAlert = false
+                            onOpenNotice()
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = btnColor)
+                    ) {
+                        Text("Notice", fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                dismissButton = {
                     TextButton(
                         onClick = { showNoticeAlert = false },
                         colors = ButtonDefaults.textButtonColors(contentColor = btnColor)
@@ -1921,7 +2169,7 @@ private fun showAdminMessageNotification(context: Context, message: String) {
 
     // NOTE: For Android 13+ you must already have POST_NOTIFICATIONS permission granted.
     val notification = NotificationCompat.Builder(appContext, ADMIN_MSG_CHANNEL_ID)
-        .setSmallIcon(R.drawable.ic_launcher_foreground)
+        .setSmallIcon(R.drawable.ic_fcm_status)
         .setContentTitle("DIU Transport Schedule")
         .setContentText(message)
         .setStyle(NotificationCompat.BigTextStyle().bigText(message))
@@ -2006,7 +2254,7 @@ private fun surfaceAtElevationCompat(isDark: Boolean, elevation: Float): Color {
     }
 }
 // ---- Notice in-app alert + notification helpers ----
-private const val PREF_NOTICES = "notice_prefs"
+// PREF_NOTICES: shared with NoticeScreen.kt (internal const)
 private const val ADMIN_UPDATES_CHANNEL_ID = "admin_updates"
 
 private const val KEY_NOTICES_VERSION = "notices_version" // Long

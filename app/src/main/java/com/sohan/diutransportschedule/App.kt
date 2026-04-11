@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.room.Room
+import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.firestore.FirebaseFirestore
 import com.sohan.diutransportschedule.db.AppDatabase
 import com.sohan.diutransportschedule.prefs.UserPrefs
@@ -39,5 +40,21 @@ class App : Application() {
             store = VersionStore(this),
             prefs = UserPrefs(this)   // ✅ prefs package এরটা
         )
+
+        // Subscribe once to admin notice topic so user app can receive pushes.
+        try {
+            val sp = applicationContext.getSharedPreferences("fcm_prefs", Context.MODE_PRIVATE)
+            val done = sp.getBoolean("topic_diu_admin_subscribed", false)
+            if (!done) {
+                FirebaseMessaging.getInstance()
+                    .subscribeToTopic("diu_admin")
+                    .addOnCompleteListener { task ->
+                        if (task.isSuccessful) {
+                            sp.edit().putBoolean("topic_diu_admin_subscribed", true).apply()
+                        }
+                    }
+            }
+        } catch (_: Throwable) {
+        }
     }
 }

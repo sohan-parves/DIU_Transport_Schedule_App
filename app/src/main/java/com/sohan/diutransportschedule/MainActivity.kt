@@ -112,6 +112,7 @@ import com.sohan.diutransportschedule.appfeature.markUpdateGuideShown
 import com.sohan.diutransportschedule.appfeature.markWelcomeGuideShown
 import com.sohan.diutransportschedule.appfeature.shouldShowUpdateGuide
 import com.sohan.diutransportschedule.appfeature.shouldShowWelcomeGuide
+import com.sohan.diutransportschedule.sync.tryIngestNoticeFromFcmLaunchIntent
 import android.app.Activity
 import com.google.android.play.core.appupdate.AppUpdateManagerFactory
 import com.google.android.play.core.appupdate.AppUpdateOptions
@@ -408,10 +409,14 @@ class MainActivity : ComponentActivity() {
             else android.graphics.Color.parseColor("#F7F8FA")
         )
         handleAlarmNotificationLaunch(intent)
+        if (intent.getBooleanExtra(EXTRA_OPEN_NOTICE, false)) {
+            openNoticeState.value = true
+        }
         Log.d("RouteNotificationScheduler", "MainActivity onCreate")
         handleStopNoticeAlarm(intent)
         handleTestScheduleNotification(intent)
         handleTestScheduleAlarm(intent)
+        tryIngestNoticeFromFcmLaunchIntent(this, intent)
         // ✅ Local testing: point Firebase SDKs to the Emulator Suite.
         // For Android Emulator use: host = "10.0.2.2"
         // For real phone on same Wi-Fi as your Mac/PC: set host to your computer's LAN IP (e.g., "192.168.0.15").
@@ -421,12 +426,14 @@ class MainActivity : ComponentActivity() {
             val e = sp.edit()
             if (!sp.contains("alarm_sound_5m")) e.putBoolean("alarm_sound_5m", true)
             if (!sp.contains("alarm_vibrate_5m")) e.putBoolean("alarm_vibrate_5m", true)
+            // Default duration: 5 seconds (sound + vibration)
+            if (!sp.contains("alarm_sound_duration_ms")) e.putLong("alarm_sound_duration_ms", 5_000L)
+            if (!sp.contains("alarm_vibrate_duration_ms")) e.putLong("alarm_vibrate_duration_ms", 5_000L)
             e.apply()
         }
         if (BuildConfig.DEBUG && USE_EMULATOR) {
             FirebaseFirestore.getInstance().useEmulator("192.168.0.105", 8080)
         }
-
         // Edge-to-edge WITHOUT hiding system bars (prevents the system app-name overlay)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = Color.TRANSPARENT
@@ -436,7 +443,6 @@ class MainActivity : ComponentActivity() {
         ensureNotificationChannel(this, NOTIF_CHANNEL_ID_SOUND_ONLY, NOTIF_CHANNEL_NAME, NOTIF_CHANNEL_DESC)
         ensureNotificationChannel(this, NOTIF_CHANNEL_ID_VIB_ONLY, NOTIF_CHANNEL_NAME, NOTIF_CHANNEL_DESC)
         ensureNotificationChannel(this, NOTIF_CHANNEL_ID_SILENT, NOTIF_CHANNEL_NAME, NOTIF_CHANNEL_DESC)
-        syncNoticeCacheIfNeeded()
         initializeFeatureGuideVersion(this)
 
         val app = application as App
@@ -474,7 +480,9 @@ class MainActivity : ComponentActivity() {
                 }
                 val items by vm.items.collectAsState()
                 val syncing by vm.isSyncing.collectAsState()
-                val shouldShowStartupLoading = items.isEmpty() && (!initialUiReady || syncing)
+                // Keep full-screen loader only for true cold-start unreadable state.
+                // Once initial UI becomes ready, do not block the screen for background syncs.
+                val shouldShowStartupLoading = items.isEmpty() && !initialUiReady
 
                 // Show full-screen loading only before the first readable data is ready,
 // or when a cold start still has no items. After data exists, keep the UI visible.
@@ -492,6 +500,25 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 val ctx = LocalContext.current
+
+                // ✅ Watch Friday route preference changes in real time so Friday reminders reschedule immediately
+                val routePrefs = remember(ctx) {
+                    ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
+                }
+                var selectedFridayRoutePref by remember {
+                    mutableStateOf(routePrefs.getString("selected_friday_route", "ALL").orEmpty().trim())
+                }
+                DisposableEffect(routePrefs) {
+                    val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+                        if (key == "selected_friday_route") {
+                            selectedFridayRoutePref =
+                                prefs.getString("selected_friday_route", "ALL").orEmpty().trim()
+                        }
+                    }
+                    routePrefs.registerOnSharedPreferenceChangeListener(listener)
+                    onDispose { routePrefs.unregisterOnSharedPreferenceChangeListener(listener) }
+                }
+
                 val activity = ctx as? Activity
                 val appUpdateManager = remember(ctx) { AppUpdateManagerFactory.create(ctx) }
                 var playUpdateChecked by remember { mutableStateOf(false) }
@@ -537,7 +564,7 @@ class MainActivity : ComponentActivity() {
                 }
 
 
-                LaunchedEffect(notifyLeadMinutes, selectedRoute, items) {
+                LaunchedEffect(notifyLeadMinutes, selectedRoute, selectedFridayRoutePref, items) {
                     try {
                         // ✅ Always keep the next schedule alarm up to date when data changes.
                         // If the user disables notifications at OS-level, scheduleNextAlarmFromData will early-return.
@@ -551,16 +578,36 @@ class MainActivity : ComponentActivity() {
                             false
                         }
 
-                        val normalizedSelectedRoute = selectedRoute.trim()
-                        val selectedIsAll = normalizedSelectedRoute.equals("ALL", ignoreCase = true)
-                        val selectedIsFridayRoute = normalizedSelectedRoute.startsWith("F", ignoreCase = true)
+                        val normalizedDailyRoute = selectedRoute.trim().ifBlank { "ALL" }
+                        val normalizedFridayRoute = selectedFridayRoutePref.ifBlank { "ALL" }
 
-                        val notificationRoute = when {
-                            selectedIsAll -> "ALL"
-                            todayIsFriday && selectedIsFridayRoute -> normalizedSelectedRoute
-                            todayIsFriday && !selectedIsFridayRoute -> "ALL"
-                            !todayIsFriday && selectedIsFridayRoute -> "ALL"
-                            else -> normalizedSelectedRoute
+                        // Master schedule notifications:
+                        // - Normal days: only if a DAILY (non-ALL, non-F*) route is selected
+                        // - Friday: only if a FRIDAY (F*) route is selected
+                        val notificationRoute = if (todayIsFriday) {
+                            normalizedFridayRoute.takeIf {
+                                it.startsWith("F", ignoreCase = true) && !it.equals("ALL", ignoreCase = true)
+                            }.orEmpty()
+                        } else {
+                            normalizedDailyRoute.takeIf {
+                                !it.equals("ALL", ignoreCase = true) && !it.startsWith("F", ignoreCase = true)
+                            }.orEmpty()
+                        }
+
+                        // Route guard (ScheduleAlarmReceiver uses this to drop stale alarms)
+                        ctx.getSharedPreferences("alarm_route_guard_prefs", Context.MODE_PRIVATE)
+                            .edit()
+                            .putString("selected_route", if (notificationRoute.isBlank()) "ALL" else notificationRoute)
+                            .apply()
+
+                        // If no valid route is selected for today, cancel any pending alarm and clear queue.
+                        if (notificationRoute.isBlank()) {
+                            cancelNextAlarm(ctx)
+                            ctx.getSharedPreferences(PREF_SCHEDULE_QUEUE, Context.MODE_PRIVATE)
+                                .edit()
+                                .putString(KEY_SCHEDULE_QUEUE, "")
+                                .apply()
+                            return@LaunchedEffect
                         }
 
                         scheduleNextAlarmFromData(
@@ -578,7 +625,6 @@ class MainActivity : ComponentActivity() {
     }
     override fun onStart() {
         super.onStart()
-        syncNoticeCacheIfNeeded()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -588,6 +634,7 @@ class MainActivity : ComponentActivity() {
         handleStopNoticeAlarm(intent)
         handleTestScheduleNotification(intent)
         handleTestScheduleAlarm(intent)
+        tryIngestNoticeFromFcmLaunchIntent(this, intent)
         if (intent.getBooleanExtra(EXTRA_OPEN_NOTICE, false)) {
             openNoticeState.value = true
         }
@@ -882,6 +929,16 @@ private const val ADMIN_UPDATES_CHANNEL_ID = "admin_updates"
 private fun ensureAdminUpdatesChannel(ctx: Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    val existing = nm.getNotificationChannel(ADMIN_UPDATES_CHANNEL_ID)
+    // If it exists but was created with sound/vibration, recreate as silent.
+    if (existing != null && (existing.sound != null || existing.shouldVibrate())) {
+        try {
+            nm.deleteNotificationChannel(ADMIN_UPDATES_CHANNEL_ID)
+        } catch (_: Throwable) {
+        }
+    } else if (existing != null) {
+        return
+    }
 
     val ch = NotificationChannel(
         ADMIN_UPDATES_CHANNEL_ID,
@@ -889,7 +946,7 @@ private fun ensureAdminUpdatesChannel(ctx: Context) {
         NotificationManager.IMPORTANCE_DEFAULT
     ).apply {
         description = "Admin notices and important updates"
-        // No alarm sound / no strong vibration for admin notices
+        // Keep admin updates silent; only schedule alarms ring/vibrate.
         enableVibration(false)
         setSound(null, null)
         setShowBadge(true)
@@ -1449,19 +1506,17 @@ fun ensureNotificationChannel(
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
 
     val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-    val existing = nm.getNotificationChannel(channelId)
-    if (existing != null &&
-        existing.importance == NotificationManager.IMPORTANCE_HIGH &&
-        existing.sound == null &&
-        !existing.shouldVibrate()
-    ) {
-        return
-    }
+    // NotificationChannel settings are user-controlled and mostly immutable after creation.
+    // If it already exists, do not delete/recreate (would also reset user preferences).
+    if (nm.getNotificationChannel(channelId) != null) return
 
-    try {
-        nm.deleteNotificationChannel(channelId)
-    } catch (_: Throwable) {
-    }
+    // Heads-up (floating) generally requires HIGH importance.
+    // Some OEMs also require vibration/sound to peek.
+    // We keep sound off (ScheduleAlarmReceiver drives sound/vibration itself),
+    // but enable a minimal vibration flag for schedule channels so they can peek.
+    val isScheduleChannel = channelId.startsWith("diu_schedule_v6_")
+    val isSilentScheduleChannel = channelId == MainActivity.NOTIF_CHANNEL_ID_SILENT
+    val enablePeekVibration = isScheduleChannel && !isSilentScheduleChannel
 
     val ch = NotificationChannel(
         channelId,
@@ -1471,8 +1526,9 @@ fun ensureNotificationChannel(
         description = channelDesc
         enableLights(true)
         lightColor = android.graphics.Color.GREEN
-        enableVibration(false)
-        vibrationPattern = longArrayOf()
+        enableVibration(enablePeekVibration)
+        // Keep the pattern effectively "silent", but allows heads-up peeking on many devices.
+        vibrationPattern = if (enablePeekVibration) longArrayOf(0L) else longArrayOf()
         setSound(null, null)
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         setShowBadge(true)

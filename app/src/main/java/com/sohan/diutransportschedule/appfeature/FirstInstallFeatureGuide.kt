@@ -8,31 +8,31 @@ private const val KEY_WELCOME_GUIDE_SHOWN = "welcome_guide_shown"
 object AppFeatureGuideContent {
     val model = AppFeatureGuideModel(
         title = "Welcome to DIU Transport Schedule",
-        subtitle = "Quick guide to help you get started",
+        subtitle = "First install guide: set up in 1 minute",
         items = listOf(
             AppFeatureGuideItem(
-                title = "Daily and Friday route setup",
-                description = "You can set one route for regular days and a separate route for Friday, so reminders follow the correct schedule for each day."
+                title = "Step 1: Select your routes",
+                description = "Go to Profile and select one daily route and one Friday route. Daily route works for regular days, and Friday route is used only on Friday."
             ),
             AppFeatureGuideItem(
-                title = "Route-based reminder alerts",
-                description = "Reminder notifications work from your selected route, with sound, vibration, and notification controls available from settings."
+                title = "Step 2: Turn on reminders",
+                description = "Enable Notify Me from Profile to get route-based reminders. The app will ask for notification and exact alarm permissions for reliable alerts."
             ),
             AppFeatureGuideItem(
-                title = "Fast search and quick access",
-                description = "Find schedules quickly by route number, stop name, or keyword, and move between tabs smoothly for faster use."
+                title = "Step 3: Set sound and vibration",
+                description = "Choose ringtone, vibration pattern, and alert duration from Profile. Alert sound and vibration will run for your selected duration."
             ),
             AppFeatureGuideItem(
-                title = "Map with live location",
-                description = "Open the map to view route lines, stops, and your current location for easier navigation during travel."
+                title = "Map and live location",
+                description = "Open Live Map to view route lines, stops, and your current location. Friday route appears on map only on Friday."
             ),
             AppFeatureGuideItem(
-                title = "Smart notices and updates",
-                description = "Important notices are synced and stored locally, and the app checks for schedule updates at fixed time slots to reduce extra data use."
+                title = "Home and Notice sync behavior",
+                description = "Schedule and notices are cached locally for faster loading. Data checks follow time windows to reduce unnecessary internet usage."
             ),
             AppFeatureGuideItem(
-                title = "Offline-friendly experience",
-                description = "Previously loaded schedule and notice data stay saved on your device, so you can still view important information even with poor internet."
+                title = "Offline-friendly use",
+                description = "Previously loaded schedule and notice data stay saved on your phone, so you can still view key information even with weak internet."
             )
         )
     )

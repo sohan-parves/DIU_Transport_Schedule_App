@@ -1,8 +1,6 @@
 
 
 package com.sohan.diutransportschedule.sync
-import org.json.JSONArray
-import org.json.JSONObject
 import java.util.UUID
 
 import android.util.Log
@@ -19,9 +17,15 @@ import com.google.firebase.messaging.RemoteMessage
 import com.sohan.diutransportschedule.R
 import android.app.PendingIntent
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import android.Manifest
 import android.content.pm.PackageManager
+import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.playAppAlertForNonScheduleNotification
+import com.sohan.diutransportschedule.ui.cacheNoticeFromPush
+import com.sohan.diutransportschedule.ui.registerNoticePushForHomePopup
 
 const val ACTION_NEW_NOTICE = "com.sohan.diutransportschedule.ACTION_NEW_NOTICE"
 
@@ -33,31 +37,63 @@ class AdminMessagingService : FirebaseMessagingService() {
         // Keep topic subscription after token refresh
         FirebaseMessaging.getInstance()
             .subscribeToTopic("diu_admin")
+        FirebaseMessaging.getInstance()
+            .subscribeToTopic("diu_transport")
         Log.d("FCM", "New FCM token: $token")
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
         // Support both Data and Notification payloads
-        val type = message.data["type"].orEmpty()
+        val rawType = message.data["type"]
+            ?: message.data["messageType"]
+            ?: message.data["category"]
+            ?: message.notification?.tag
+            ?: ""
+        val type = rawType.trim()
         Log.d("FCM", "onMessageReceived: type=$type data=${message.data} notifTitle=${message.notification?.title} notifBody=${message.notification?.body}")
 
+        val nowMs = System.currentTimeMillis()
+
+        val looksLikeNotice = isNoticePayload(message, type)
+
         val title = when {
-            type.equals("notice", ignoreCase = true) ->
-                message.data["title"].orEmpty().ifBlank { "Transport Notice" }
+            looksLikeNotice ->
+                firstNonBlank(
+                    message.data["title"],
+                    message.data["noticeTitle"],
+                    message.data["notice_title"],
+                    message.notification?.title
+                ) ?: "Transport Notice"
             else ->
-                message.notification?.title
-                    ?: message.data["title"]
-                    ?: "DIU Transport Schedule"
+                firstNonBlank(
+                    message.notification?.title,
+                    message.data["title"],
+                    message.data["noticeTitle"],
+                    message.data["notice_title"]
+                ) ?: "DIU Transport Schedule"
         }
 
         val body = when {
-            type.equals("notice", ignoreCase = true) ->
-                message.data["body"].orEmpty().ifBlank { message.notification?.body.orEmpty() }
+            looksLikeNotice ->
+                firstNonBlank(
+                    message.data["body"],
+                    message.data["message"],
+                    message.data["noticeBody"],
+                    message.data["notice_body"],
+                    message.data["content"],
+                    message.data["text"],
+                    message.notification?.body
+                ).orEmpty()
             else ->
-                message.notification?.body
-                    ?: message.data["body"]
-                    ?: message.data["message"]
-                    ?: ""
+                firstNonBlank(
+                    message.notification?.body,
+                    message.data["body"],
+                    message.data["message"],
+                    message.data["noticeBody"],
+                    message.data["notice_body"],
+                    message.data["content"],
+                    message.data["text"]
+                ).orEmpty()
         }
 
         val canShowSystemNotification = body.isNotBlank()
@@ -65,8 +101,101 @@ class AdminMessagingService : FirebaseMessagingService() {
             Log.w("FCM", "FCM received but body is blank; skipping system notification")
         }
 
-        // Only show a system notification for published NOTICE messages
-        if (type.equals("notice", ignoreCase = true) && canShowSystemNotification) {
+
+        if (looksLikeNotice && body.isNotBlank()) {
+            val id = message.data["id"]
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: message.data["noticeId"]
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                ?: message.data["notice_id"]
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                ?: buildStableNoticeId(title = title, body = body)
+
+            val createdAtMs = message.data["createdAtMs"]?.toLongOrNull()
+                ?: message.data["created_at_ms"]?.toLongOrNull()
+                ?: message.data["tsMillis"]?.toLongOrNull()
+                ?: message.data["timestamp"]?.toLongOrNull()
+                ?: nowMs
+
+            val releaseAtMs = message.data["releaseAtMs"]?.toLongOrNull()
+                ?: message.data["release_at_ms"]?.toLongOrNull()
+                ?: message.data["releaseDateMs"]?.toLongOrNull()
+                ?: message.data["publishedAtMs"]?.toLongOrNull()
+                ?: message.data["createdAtMs"]?.toLongOrNull()
+                ?: createdAtMs
+
+            try {
+                cacheNoticeFromPush(
+                    ctx = applicationContext,
+                    id = id,
+                    title = title,
+                    body = body,
+                    createdAtMs = createdAtMs,
+                    releaseAtMs = releaseAtMs
+                )
+                registerNoticePushForHomePopup(
+                    ctx = applicationContext,
+                    id = id,
+                    title = title,
+                    body = body,
+                    createdAtMs = createdAtMs,
+                    releaseAtMs = releaseAtMs
+                )
+                try {
+                    val noticeIntent = Intent(ACTION_NEW_NOTICE).apply {
+                        `package` = applicationContext.packageName
+                        putExtra("id", id)
+                        putExtra("title", title)
+                        putExtra("body", body)
+                        putExtra("createdAtMs", createdAtMs)
+                        putExtra("releaseAtMs", releaseAtMs)
+                    }
+                    // UI receivers update Compose state — deliver on main thread.
+                    Handler(Looper.getMainLooper()).post {
+                        try {
+                            applicationContext.sendBroadcast(noticeIntent)
+                        } catch (_: Throwable) {
+                        }
+                    }
+                } catch (_: Throwable) {
+                }
+                Log.d("FCM", "Notice cached from push: id=$id title=$title")
+            } catch (t: Throwable) {
+                Log.w("FCM", "Failed to cache notice locally", t)
+            }
+        } else if (body.isNotBlank()) {
+            // Persist last admin message so Home screen can show popup
+            // even if the message arrives while app is backgrounded.
+            try {
+                val id = (title.trim() + "|" + body.trim() + "|" + nowMs).hashCode().toString()
+                applicationContext
+                    .getSharedPreferences(PREF_ADMIN_MESSAGE, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_ADMIN_MESSAGE_ID, id)
+                    .putString(KEY_ADMIN_MESSAGE_TITLE, title)
+                    .putString(KEY_ADMIN_MESSAGE_BODY, body)
+                    .putLong(KEY_ADMIN_MESSAGE_TS, nowMs)
+                    .apply()
+            } catch (_: Throwable) {
+            }
+            try {
+                val msgIntent = Intent(ACTION_NEW_ADMIN_MESSAGE).apply {
+                    `package` = applicationContext.packageName
+                    putExtra("title", title)
+                    putExtra("body", body)
+                }
+                applicationContext.sendBroadcast(msgIntent)
+            } catch (_: Throwable) {
+            }
+        }
+
+        // Show a system notification for both notice and admin messages.
+        // Only notice payloads are cached into the Notice screen.
+        if (canShowSystemNotification) {
+            val openNoticeScreen = looksLikeNotice
             val nmCompat = NotificationManagerCompat.from(applicationContext)
             if (!nmCompat.areNotificationsEnabled()) {
                 Log.w("FCM", "Notifications are disabled for this app; skipping system notification")
@@ -78,63 +207,123 @@ class AdminMessagingService : FirebaseMessagingService() {
                 if (!granted) {
                     Log.w("FCM", "POST_NOTIFICATIONS not granted; skipping system notification")
                 } else {
-                    showAdminNotification(applicationContext, title, body)
+                    showAdminNotification(applicationContext, title, body, openNoticeScreen)
                 }
             } else {
-                showAdminNotification(applicationContext, title, body)
+                showAdminNotification(applicationContext, title, body, openNoticeScreen)
             }
-        }
 
-        // Persist into local prefs for in-app Notice list
-        try {
-            val prefs = applicationContext.getSharedPreferences("admin_notices", Context.MODE_PRIVATE)
-            val raw = prefs.getString("json", "[]") ?: "[]"
-            val arr = JSONArray(raw)
-
-            val o = JSONObject()
-            o.put("id", message.data["id"] ?: UUID.randomUUID().toString())
-            o.put("title", title)
-            o.put("body", body)
-            o.put("tsMillis", System.currentTimeMillis())
-            o.put("isRead", false)
-
-            // newest first
-            val out = JSONArray()
-            out.put(o)
-            for (i in 0 until arr.length()) out.put(arr.getJSONObject(i))
-
-            prefs.edit().putString("json", out.toString()).apply()
-
-            // Notify UI (Home popup) when app is open
-            if (type.equals("notice", ignoreCase = true) && body.isNotBlank()) {
-                val i = Intent(ACTION_NEW_NOTICE).apply {
-                    setPackage(applicationContext.packageName)
-                    putExtra("title", title)
-                    putExtra("body", body)
-                    putExtra("tsMillis", System.currentTimeMillis())
-                }
-                applicationContext.sendBroadcast(i)
+            // 🔔 Use app-selected ringtone/vibration (not system default)
+            // Keep channel silent; play a short one-shot alert ourselves.
+            try {
+                playAppAlertForNonScheduleNotification(applicationContext)
+            } catch (_: Throwable) {
             }
-        } catch (_: Throwable) {
         }
     }
 
-    private fun showAdminNotification(context: Context, title: String, body: String) {
+    private fun isNoticePayload(message: RemoteMessage, type: String): Boolean {
+        val data = message.data
+
+        // DIUTransportAdmin: general pushes use type/category/messageType = admin_message (may target diu_transport).
+        if (type.equals("admin_message", ignoreCase = true)) return false
+        if (data["type"]?.equals("admin_message", ignoreCase = true) == true) return false
+        if (data["category"]?.equals("admin_message", ignoreCase = true) == true) return false
+        if (data["messageType"]?.equals("admin_message", ignoreCase = true) == true) return false
+
+        if (type.equals("notice", ignoreCase = true)) return true
+
+        if (data["open_notice"]?.equals("true", ignoreCase = true) == true) return true
+        if (data["screen"]?.equals("notice", ignoreCase = true) == true) return true
+        if (data["target"]?.equals("notice", ignoreCase = true) == true) return true
+        if (data["target"]?.equals("diu_transport", ignoreCase = true) == true) return true
+        if (data["topic"]?.equals("diu_transport", ignoreCase = true) == true) return true
+        if (data["channel"]?.equals("notice", ignoreCase = true) == true) return true
+        if (data.containsKey("noticeId")) return true
+        if (data.containsKey("notice_id")) return true
+        if (data.containsKey("releaseAtMs")) return true
+        if (data.containsKey("release_at_ms")) return true
+        if (data.containsKey("releaseDateMs")) return true
+        if (data.containsKey("noticeTitle")) return true
+        if (data.containsKey("noticeBody")) return true
+        if (data.containsKey("notice_title")) return true
+        if (data.containsKey("notice_body")) return true
+        if (data["category"]?.equals("notice", ignoreCase = true) == true) return true
+        if (data["messageType"]?.equals("notice", ignoreCase = true) == true) return true
+
+        // Common backend aliases for type=notice
+        for (key in listOf("ntf_type", "event", "kind", "payload_type", "notice_type", "msg_type")) {
+            if (data[key]?.equals("notice", ignoreCase = true) == true) return true
+        }
+
+        // Topic sends (Console / Admin SDK) often have no data keys; `from` is like "/topics/diu_admin".
+        val from = message.from.orEmpty()
+        if (from.contains("diu_admin", ignoreCase = true)) return true
+        if (from.contains("diu_transport", ignoreCase = true)) return true
+
+        // Token / direct sends: `from` is often the numeric sender id, not "/topics/...". Firebase Console
+        // "notification" campaigns usually ship with an empty data map — still treat as notice for this app.
+        if (data.isEmpty() && message.notification != null) {
+            val nb = message.notification!!.body
+            if (!nb.isNullOrBlank()) {
+                val tag = message.notification!!.tag?.trim().orEmpty()
+                if (tag.equals("admin_popup_only", ignoreCase = true)) return false
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun firstNonBlank(vararg values: String?): String? {
+        for (v in values) {
+            val t = v?.trim().orEmpty()
+            if (t.isNotEmpty()) return t
+        }
+        return null
+    }
+
+    private fun buildStableNoticeId(title: String, body: String): String {
+        return (title.trim() + "|" + body.trim()).hashCode().toString()
+    }
+
+    private fun showAdminNotification(
+        context: Context,
+        title: String,
+        body: String,
+        openNoticeScreen: Boolean
+    ) {
         val appContext = context.applicationContext
 
         // Android 8+ channel
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            val existing = nm.getNotificationChannel(ADMIN_MSG_CHANNEL_ID)
+
+            // Ensure this channel is SILENT: schedule alarms handle ring/vibration themselves.
+            // (Channel sound/vibration are immutable once created.)
+            val needsRecreate = existing != null && (
+                existing.sound != null || existing.shouldVibrate()
+            )
+            if (needsRecreate) {
+                try {
+                    nm.deleteNotificationChannel(ADMIN_MSG_CHANNEL_ID)
+                } catch (_: Throwable) {
+                }
+            }
+
             val channel = NotificationChannel(
                 ADMIN_MSG_CHANNEL_ID,
                 "Admin messages",
-                NotificationManager.IMPORTANCE_HIGH
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "Transport notices and important admin updates"
-                enableVibration(true)
+                enableVibration(false)
+                setSound(null, null)
                 setShowBadge(true)
                 lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
             }
-            val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)
         }
 
@@ -142,6 +331,9 @@ class AdminMessagingService : FirebaseMessagingService() {
             .getLaunchIntentForPackage(appContext.packageName)
             ?.apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                if (openNoticeScreen) {
+                    putExtra(MainActivity.EXTRA_OPEN_NOTICE, true)
+                }
             }
 
         val pending = if (openIntent != null) {
@@ -155,12 +347,13 @@ class AdminMessagingService : FirebaseMessagingService() {
         } else null
 
         val builder = NotificationCompat.Builder(appContext, ADMIN_MSG_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.drawable.ic_fcm_status)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            // Keep admin push silent; only schedule alarms should ring/vibrate.
+            .setDefaults(0)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setAutoCancel(true)
 
@@ -174,5 +367,12 @@ class AdminMessagingService : FirebaseMessagingService() {
 
     companion object {
         private const val ADMIN_MSG_CHANNEL_ID = "admin_updates"
+        const val ACTION_NEW_ADMIN_MESSAGE = "com.sohan.diutransportschedule.ACTION_NEW_ADMIN_MESSAGE"
+
+        private const val PREF_ADMIN_MESSAGE = "admin_message_popup"
+        private const val KEY_ADMIN_MESSAGE_ID = "id"
+        private const val KEY_ADMIN_MESSAGE_TITLE = "title"
+        private const val KEY_ADMIN_MESSAGE_BODY = "body"
+        private const val KEY_ADMIN_MESSAGE_TS = "ts"
     }
 }

@@ -77,6 +77,7 @@ import android.media.AudioAttributes
 import android.media.MediaPlayer
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.produceState
 import androidx.compose.animation.core.animateFloatAsState
@@ -94,6 +95,7 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -126,6 +128,7 @@ import androidx.compose.runtime.key
 import androidx.compose.material.icons.outlined.Info
 import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
 import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
+import androidx.compose.runtime.mutableLongStateOf
 
 private fun ColorScheme.surfaceColorAtElevationCompat(elevation: Dp): Color {
     if (elevation == 0.dp) return surface
@@ -135,20 +138,38 @@ private fun ColorScheme.surfaceColorAtElevationCompat(elevation: Dp): Color {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(vm: HomeViewModel) {
+    val ctx = LocalContext.current
+    val routePrefs = remember(ctx) {
+        ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
+    }
+
     val dark by vm.darkMode.collectAsState()
     val selectedRoute by vm.selectedRoute.collectAsState()
     val isFriday = java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
-    val isSelectedAll = selectedRoute.trim().equals("ALL", ignoreCase = true)
-    val isSelectedFridayRoute = selectedRoute.trim().startsWith("F", ignoreCase = true)
-
-    LaunchedEffect(selectedRoute, isFriday) {
-        val shouldEnableNotifications = when {
-            isSelectedAll -> false
-            isFriday -> isSelectedFridayRoute
-            else -> !isSelectedFridayRoute
-        }
-        vm.setNotificationsEnabled(shouldEnableNotifications)
+    var selectedFridayRouteNoUi by rememberSaveable {
+        mutableStateOf(routePrefs.getString("selected_friday_route", "").orEmpty())
     }
+
+    val normalizedDailyRoute = selectedRoute.trim().ifBlank { "ALL" }
+    val normalizedFridayRoute = selectedFridayRouteNoUi.trim().ifBlank { "ALL" }
+
+    // Friday vs weekday: separate rules. Friday = must pick a Friday (F*) route, not ALL.
+    // Weekdays = must pick a daily route, not ALL and not an F* route.
+    val dailyAllowsMasterNotifications = remember(normalizedDailyRoute) {
+        val d = normalizedDailyRoute.trim()
+        d.isNotBlank() &&
+            !d.equals("ALL", ignoreCase = true) &&
+            !d.startsWith("F", ignoreCase = true)
+    }
+    val fridayAllowsMasterNotifications = remember(normalizedFridayRoute) {
+        val f = normalizedFridayRoute.trim()
+        f.isNotBlank() &&
+            !f.equals("ALL", ignoreCase = true) &&
+            f.startsWith("F", ignoreCase = true)
+    }
+    val routeAllowsMasterNotificationsToday =
+        if (isFriday) fridayAllowsMasterNotifications else dailyAllowsMasterNotifications
+    val notificationsBlockedByRoute = !routeAllowsMasterNotificationsToday
 
 // ✅ Always use FULL route list from VM (not filtered by Home)
     val routeOptions by vm.routeOptions.collectAsState()
@@ -201,11 +222,8 @@ fun ProfileScreen(vm: HomeViewModel) {
         if (dark) Color.White.copy(alpha = 0.88f) else MaterialTheme.colorScheme.onSurfaceVariant
     val view = LocalView.current
     val notificationsEnabled by vm.notificationsEnabled.collectAsState()
-    val effectiveNotificationsEnabled = notificationsEnabled && when {
-        isSelectedAll -> false
-        isFriday -> isSelectedFridayRoute
-        else -> !isSelectedFridayRoute
-    }
+    val effectiveNotificationsEnabled =
+        notificationsEnabled && routeAllowsMasterNotificationsToday
     val notifyLeadMinutes by vm.notifyLeadMinutes.collectAsState()
     val navBarBottomPad = with(LocalDensity.current) {
         val bottomPx = runCatching {
@@ -215,8 +233,6 @@ fun ProfileScreen(vm: HomeViewModel) {
         }.getOrNull() ?: 0
         bottomPx.toDp()
     }
-    val ctx = LocalContext.current
-
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     var showProfileFeatureGuide by remember { mutableStateOf(false) }
@@ -231,6 +247,13 @@ fun ProfileScreen(vm: HomeViewModel) {
         remember(ctx) { ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE) }
     val hostActivity = ctx as? com.sohan.diutransportschedule.MainActivity
 
+    var alarmSound5mEnabled by rememberSaveable {
+        mutableStateOf(alertPrefs.getBoolean("alarm_sound_5m", false))
+    }
+    var alarmVibrate5mEnabled by rememberSaveable {
+        mutableStateOf(alertPrefs.getBoolean("alarm_vibrate_5m", true))
+    }
+
     fun hasNotificationPermissionNow(): Boolean {
         if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return false
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -243,13 +266,53 @@ fun ProfileScreen(vm: HomeViewModel) {
         }
     }
 
+    val latestRouteAllowsMaster by rememberUpdatedState(routeAllowsMasterNotificationsToday)
+
+    fun routeAllowsNotifyTodayForDailyPick(dailyRouteNo: String): Boolean {
+        val d = dailyRouteNo.trim()
+        return if (isFriday) {
+            val f = selectedFridayRouteNoUi.trim().ifBlank { "ALL" }
+            f.isNotBlank() &&
+                !f.equals("ALL", ignoreCase = true) &&
+                f.startsWith("F", ignoreCase = true)
+        } else {
+            d.isNotBlank() &&
+                !d.equals("ALL", ignoreCase = true) &&
+                !d.startsWith("F", ignoreCase = true)
+        }
+    }
+
+    fun routeAllowsNotifyTodayForFridayPick(fridayRouteRaw: String): Boolean {
+        if (!isFriday) return false
+        val f = fridayRouteRaw.trim().ifBlank { "ALL" }
+        return f.isNotBlank() &&
+            !f.equals("ALL", ignoreCase = true) &&
+            f.startsWith("F", ignoreCase = true)
+    }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted && NotificationManagerCompat.from(ctx).areNotificationsEnabled()) {
-            vm.setNotificationsEnabled(true)
-            alertPrefs.edit().putBoolean("master_notifications_enabled", true).apply()
-            showToggleMessage("Notifications enabled")
+            if (!latestRouteAllowsMaster) {
+                vm.setNotificationsEnabled(false)
+                alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
+                showToggleMessage(
+                    if (isFriday) {
+                        "Select a Friday route (not ALL) to enable notifications"
+                    } else {
+                        "Select a daily route (not ALL) to enable notifications"
+                    }
+                )
+            } else {
+                vm.setNotificationsEnabled(true)
+                alarmVibrate5mEnabled = true
+                alertPrefs.edit()
+                    .putBoolean("master_notifications_enabled", true)
+                    .putBoolean("alarm_vibrate_5m", true)
+                    .apply()
+                showToggleMessage("Notifications enabled")
+            }
         } else {
             vm.setNotificationsEnabled(false)
             alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
@@ -262,14 +325,18 @@ fun ProfileScreen(vm: HomeViewModel) {
         "android.resource://${ctx.packageName}/${R.raw.app_default_ringtone}"
     val appDefaultRingtoneName = "App default ringtone"
 
-    LaunchedEffect(notificationsEnabled) {
-        val allowed = notificationsEnabled && hasNotificationPermissionNow()
-        if (notificationsEnabled && !allowed) {
+    LaunchedEffect(notificationsEnabled, routeAllowsMasterNotificationsToday) {
+        val osOk = hasNotificationPermissionNow()
+        val persist = notificationsEnabled && osOk && routeAllowsMasterNotificationsToday
+        if (notificationsEnabled && (!osOk || !routeAllowsMasterNotificationsToday)) {
             vm.setNotificationsEnabled(false)
         }
-        alertPrefs.edit()
-            .putBoolean("master_notifications_enabled", allowed)
-            .apply()
+        val ed = alertPrefs.edit().putBoolean("master_notifications_enabled", persist)
+        if (persist) {
+            ed.putBoolean("alarm_vibrate_5m", true)
+            alarmVibrate5mEnabled = true
+        }
+        ed.apply()
     }
 
     var customRingtoneUri by rememberSaveable {
@@ -610,13 +677,33 @@ fun ProfileScreen(vm: HomeViewModel) {
         }.getOrElse { emptyList() }
     }
 
-    var alarmSound5mEnabled by rememberSaveable {
-        mutableStateOf(alertPrefs.getBoolean("alarm_sound_5m", false))
+    val alarmDurationOptions = listOf(
+        5_000L to "5 sec",
+        10_000L to "10 sec",
+        15_000L to "15 sec",
+        30_000L to "30 sec",
+        60_000L to "1 min",
+        120_000L to "2 min",
+        180_000L to "3 min",
+        300_000L to "5 min"
+    )
+
+    var alarmSoundDurationMs by rememberSaveable {
+        mutableLongStateOf(
+            alertPrefs.getLong("alarm_sound_duration_ms", 5_000L)
+                .coerceIn(5_000L, 5 * 60 * 1000L)
+        )
     }
 
-    var alarmVibrate5mEnabled by rememberSaveable {
-        mutableStateOf(alertPrefs.getBoolean("alarm_vibrate_5m", true))
+    var alarmVibrateDurationMs by rememberSaveable {
+        mutableLongStateOf(
+            alertPrefs.getLong("alarm_vibrate_duration_ms", 5_000L)
+                .coerceIn(5_000L, 5 * 60 * 1000L)
+        )
     }
+
+    var alarmSoundDurationMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    var alarmVibrateDurationMenuExpanded by rememberSaveable { mutableStateOf(false) }
 
     var customVibrationPattern by rememberSaveable {
         mutableStateOf(
@@ -671,17 +758,13 @@ fun ProfileScreen(vm: HomeViewModel) {
             color = MaterialTheme.colorScheme.background
         ) {
             val scrollState = rememberScrollState()
-            val ctx = LocalContext.current
-            val routePrefs = remember {
-                ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
-            }
             val alarmGuardPrefs = remember {
                 ctx.getSharedPreferences("alarm_route_guard_prefs", Context.MODE_PRIVATE)
             }
 
-            var selectedFridayRouteNoUi by rememberSaveable {
-                mutableStateOf(routePrefs.getString("selected_friday_route", "").orEmpty())
-            }
+            // MainNav keeps Profile composed at startup; skip the first route pass so Home's single
+            // initial refresh isn't followed by duplicate sync work (and extra loading feel).
+            var skipInitialProfileRouteRefresh by rememberSaveable { mutableStateOf(true) }
 
             if (showReloadPopup || isSyncing) {
                 Dialog(
@@ -864,18 +947,31 @@ fun ProfileScreen(vm: HomeViewModel) {
                         }
 
                         LaunchedEffect(selectedRoute, isFriday, selectedFridayRouteNoUi) {
+                            val normalizedDailyRoute = selectedRoute.trim().ifBlank { "ALL" }
                             val normalizedFridayRoute = selectedFridayRouteNoUi.trim().ifBlank { "ALL" }
+
                             vm.setSelectedFridayRoute(normalizedFridayRoute)
 
+                            routePrefs.edit()
+                                .putString("selected_route", normalizedDailyRoute)
+                                .putString("selected_friday_route", normalizedFridayRoute)
+                                .apply()
+
                             val guardedRoute = if (isFriday) {
-                                selectedFridayRouteNoUi.trim()
+                                normalizedFridayRoute
                             } else {
-                                selectedRoute.trim()
+                                normalizedDailyRoute
                             }
 
                             alarmGuardPrefs.edit()
                                 .putString("selected_route", guardedRoute.ifBlank { "ALL" })
                                 .apply()
+
+                            if (skipInitialProfileRouteRefresh) {
+                                skipInitialProfileRouteRefresh = false
+                            } else {
+                                vm.refreshFromLocalOnceIfAvailable(ctx)
+                            }
                         }
 
                         val effectiveNotificationRouteNo = remember(
@@ -1060,18 +1156,33 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         },
                                         onClick = {
                                             dailyRouteMenuExpanded = false
-                                            vm.setSelectedRoute(opt.routeNo)
-
                                             val rid = opt.routeNo.trim()
                                             val fullRoadText = buildString {
-                                                append(opt.routeNo.trim())
+                                                append(rid)
                                                 if (opt.compactLabel.isNotBlank()) {
                                                     append(" — ")
                                                     append(opt.compactLabel)
                                                 }
                                             }
                                             scope.launch {
+                                                vm.setSelectedRoute(opt.routeNo)
                                                 SelectedRoadStore.save(ctx, rid, fullRoadText)
+                                                vm.selectedRoute.first {
+                                                    it.trim().equals(rid, ignoreCase = true)
+                                                }
+                                                if (routeAllowsNotifyTodayForDailyPick(rid) &&
+                                                    hasNotificationPermissionNow()
+                                                ) {
+                                                    vm.setNotificationsEnabled(true)
+                                                    vm.notificationsEnabled.first { it }
+                                                    alarmVibrate5mEnabled = true
+                                                    alarmSound5mEnabled = false
+                                                    alertPrefs.edit()
+                                                        .putBoolean("master_notifications_enabled", true)
+                                                        .putBoolean("alarm_vibrate_5m", true)
+                                                        .putBoolean("alarm_sound_5m", false)
+                                                        .apply()
+                                                }
                                             }
                                         }
                                     )
@@ -1259,7 +1370,28 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             }
 
                                             scope.launch {
-                                                SelectedRoadStore.save(ctx, normalizedFridayRoute, fullRoadText)
+                                                val frVm =
+                                                    normalizedFridayRoute.ifBlank { "ALL" }
+                                                vm.setSelectedFridayRoute(frVm)
+                                                SelectedRoadStore.save(
+                                                    ctx,
+                                                    normalizedFridayRoute,
+                                                    fullRoadText
+                                                )
+                                                if (routeAllowsNotifyTodayForFridayPick(
+                                                        normalizedFridayRoute
+                                                    ) && hasNotificationPermissionNow()
+                                                ) {
+                                                    vm.setNotificationsEnabled(true)
+                                                    vm.notificationsEnabled.first { it }
+                                                    alarmVibrate5mEnabled = true
+                                                    alarmSound5mEnabled = false
+                                                    alertPrefs.edit()
+                                                        .putBoolean("master_notifications_enabled", true)
+                                                        .putBoolean("alarm_vibrate_5m", true)
+                                                        .putBoolean("alarm_sound_5m", false)
+                                                        .apply()
+                                                }
                                             }
                                         }
                                     )
@@ -1339,26 +1471,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        val notificationsBlockedByRoute = remember(
-                            isFriday,
-                            selectedRoute,
-                            selectedFridayRouteNoUi
-                        ) {
-                            val effectiveRoute = if (isFriday) {
-                                selectedFridayRouteNoUi.trim()
-                            } else {
-                                selectedRoute.trim()
-                            }
-
-                            effectiveRoute.isBlank() ||
-                                    effectiveRoute.equals("ALL", ignoreCase = true)
-                        }
-                        val canAutoEnableNotifications = remember(
-                            notificationsBlockedByRoute,
-                            effectiveNotificationsEnabled
-                        ) {
-                            !notificationsBlockedByRoute && !effectiveNotificationsEnabled
-                        }
                         Text(
                             text = "Features",
                             style = MaterialTheme.typography.titleMedium,
@@ -1414,9 +1526,9 @@ fun ProfileScreen(vm: HomeViewModel) {
                                     text = when {
                                         notificationsBlockedByRoute -> {
                                             if (isFriday) {
-                                                "Select a Friday route to enable Friday notifications"
+                                                "Friday: pick a Friday route (not ALL). Daily route does not apply today."
                                             } else {
-                                                "Select a daily route to enable notifications"
+                                                "Non‑Friday: pick a daily route (not ALL, not a Friday route). Friday route does not apply today."
                                             }
                                         }
                                         else -> "Turn this ON to enable notifications and vibration together. Ringtone is controlled separately below"
@@ -1443,19 +1555,27 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             vm.setNotificationsEnabled(false)
                                             alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
                                             showToggleMessage(
-                                                if (isFriday) "Select a Friday route to enable Friday notifications"
-                                                else "Select a daily route to enable notifications"
+                                                if (isFriday) {
+                                                    "Select a Friday route (not ALL) to enable notifications"
+                                                } else {
+                                                    "Select a daily route (not ALL) to enable notifications"
+                                                }
                                             )
                                         } else if (hasNotificationPermissionNow()) {
                                             vm.setNotificationsEnabled(true)
+
+                                            val savedAlarmSoundEnabled = alertPrefs.getBoolean("alarm_sound_5m", false)
+
                                             alarmVibrate5mEnabled = true
-                                            alarmSound5mEnabled = false
+                                            // Do NOT auto enable ringtone when master ON
+                                            alarmSound5mEnabled = alertPrefs.getBoolean("alarm_sound_5m", false)
+
                                             alertPrefs.edit()
                                                 .putBoolean("master_notifications_enabled", true)
                                                 .putBoolean("alarm_vibrate_5m", true)
-                                                .putBoolean("alarm_sound_5m", false)
+                                                .putBoolean("alarm_sound_5m", alarmSound5mEnabled)
                                                 .apply()
-                                            showToggleMessage("Notifications enabled. Vibration ON. Ringtone OFF")
+                                            showToggleMessage("Notifications enabled")
                                         } else {
                                             vm.setNotificationsEnabled(false)
                                             alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
@@ -1491,30 +1611,12 @@ fun ProfileScreen(vm: HomeViewModel) {
                             )
                         }
 
-                        LaunchedEffect(
-                            canAutoEnableNotifications,
-                            isFriday,
-                            selectedRoute,
-                            selectedFridayRouteNoUi
-                        ) {
-                            if (canAutoEnableNotifications && hasNotificationPermissionNow()) {
-                                vm.setNotificationsEnabled(true)
-                                alarmVibrate5mEnabled = true
-                                alarmSound5mEnabled = false
-                                alertPrefs.edit()
-                                    .putBoolean("master_notifications_enabled", true)
-                                    .putBoolean("alarm_vibrate_5m", true)
-                                    .putBoolean("alarm_sound_5m", false)
-                                    .apply()
-                            }
-                        }
-
                         if (notificationsBlockedByRoute) {
                             Text(
                                 text = if (isFriday)
-                                    "Friday notifications use the Friday route selection."
+                                    "Today is Friday — only the Friday route dropdown controls whether notifications can be on."
                                 else
-                                    "Notifications use the daily route selection on normal days.",
+                                    "Any day except Friday — only the daily route dropdown controls whether notifications can be on.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = secondaryText
                             )
@@ -1612,12 +1714,12 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = "Ringtone (5 min)",
+                                            text = "Ringtone",
                                             style = MaterialTheme.typography.bodyLarge,
                                             color = primaryText
                                         )
                                         Text(
-                                            text = "Play alarm ringtone for ~5 minutes when a notice arrives",
+                                            text = "Play alarm ringtone when a notice arrives",
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = secondaryText
                                         )
@@ -1633,6 +1735,99 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         enabled = effectiveNotificationsEnabled,
                                         colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                                     )
+                                }
+
+                                AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmSound5mEnabled) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        HorizontalDivider(
+                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider
+                                        )
+
+                                        Text(
+                                            text = "Ringtone duration",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = primaryText,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+
+                                        Text(
+                                            text = "Choose how long ringtone should continue",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = secondaryText
+                                        )
+
+                                        ExposedDropdownMenuBox(
+                                            expanded = alarmSoundDurationMenuExpanded,
+                                            onExpandedChange = { alarmSoundDurationMenuExpanded = !alarmSoundDurationMenuExpanded }
+                                        ) {
+                                            val selectedAlarmSoundDurationLabel = alarmDurationOptions.firstOrNull {
+                                                it.first == alarmSoundDurationMs
+                                            }?.second ?: "30 sec"
+
+                                            OutlinedTextField(
+                                                value = selectedAlarmSoundDurationLabel,
+                                                onValueChange = {},
+                                                readOnly = true,
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .menuAnchor()
+                                                    .fillMaxWidth(),
+                                                shape = RoundedCornerShape(18.dp),
+                                                label = { Text("Ringtone duration") },
+                                                trailingIcon = {
+                                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = alarmSoundDurationMenuExpanded)
+                                                },
+                                                colors = OutlinedTextFieldDefaults.colors(
+                                                    focusedBorderColor = if (alarmSoundDurationMenuExpanded)
+                                                        (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+                                                    else
+                                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                                    focusedTextColor = primaryText,
+                                                    unfocusedTextColor = primaryText,
+                                                    focusedLabelColor = if (alarmSoundDurationMenuExpanded)
+                                                        (if (dark) Color.White else MaterialTheme.colorScheme.primary)
+                                                    else
+                                                        (if (dark) Color.White else secondaryText),
+                                                    unfocusedLabelColor = if (dark) Color.White else secondaryText,
+                                                    focusedContainerColor = Color.Transparent,
+                                                    unfocusedContainerColor = Color.Transparent
+                                                )
+                                            )
+
+                                            ExposedDropdownMenu(
+                                                expanded = alarmSoundDurationMenuExpanded,
+                                                onDismissRequest = { alarmSoundDurationMenuExpanded = false },
+                                                modifier = Modifier
+                                                    .exposedDropdownSize()
+                                                    .background(MaterialTheme.colorScheme.surface)
+                                            ) {
+                                                alarmDurationOptions.forEach { (durationMs, label) ->
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Text(
+                                                                text = label,
+                                                                color = if (durationMs == alarmSoundDurationMs) {
+                                                                    if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.onSurface
+                                                                },
+                                                                fontWeight = if (durationMs == alarmSoundDurationMs) FontWeight.SemiBold else FontWeight.Normal
+                                                            )
+                                                        },
+                                                        onClick = {
+                                                            alarmSoundDurationMenuExpanded = false
+                                                            alarmSoundDurationMs = durationMs
+                                                            alertPrefs.edit()
+                                                                .putLong("alarm_sound_duration_ms", durationMs)
+                                                                .apply()
+                                                            showToggleMessage("Ringtone duration set to $label")
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
 
                                 AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmSound5mEnabled) {
@@ -1782,6 +1977,99 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         enabled = effectiveNotificationsEnabled,
                                         colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                                     )
+                                }
+
+                                AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmVibrate5mEnabled) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        HorizontalDivider(
+                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider
+                                        )
+
+                                        Text(
+                                            text = "Vibration duration",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = primaryText,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+
+                                        Text(
+                                            text = "Choose how long vibration should continue",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = secondaryText
+                                        )
+
+                                        ExposedDropdownMenuBox(
+                                            expanded = alarmVibrateDurationMenuExpanded,
+                                            onExpandedChange = { alarmVibrateDurationMenuExpanded = !alarmVibrateDurationMenuExpanded }
+                                        ) {
+                                            val selectedAlarmVibrateDurationLabel = alarmDurationOptions.firstOrNull {
+                                                it.first == alarmVibrateDurationMs
+                                            }?.second ?: "30 sec"
+
+                                            OutlinedTextField(
+                                                value = selectedAlarmVibrateDurationLabel,
+                                                onValueChange = {},
+                                                readOnly = true,
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .menuAnchor()
+                                                    .fillMaxWidth(),
+                                                shape = RoundedCornerShape(18.dp),
+                                                label = { Text("Vibration duration") },
+                                                trailingIcon = {
+                                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = alarmVibrateDurationMenuExpanded)
+                                                },
+                                                colors = OutlinedTextFieldDefaults.colors(
+                                                    focusedBorderColor = if (alarmVibrateDurationMenuExpanded)
+                                                        (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+                                                    else
+                                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
+                                                    focusedTextColor = primaryText,
+                                                    unfocusedTextColor = primaryText,
+                                                    focusedLabelColor = if (alarmVibrateDurationMenuExpanded)
+                                                        (if (dark) Color.White else MaterialTheme.colorScheme.primary)
+                                                    else
+                                                        (if (dark) Color.White else secondaryText),
+                                                    unfocusedLabelColor = if (dark) Color.White else secondaryText,
+                                                    focusedContainerColor = Color.Transparent,
+                                                    unfocusedContainerColor = Color.Transparent
+                                                )
+                                            )
+
+                                            ExposedDropdownMenu(
+                                                expanded = alarmVibrateDurationMenuExpanded,
+                                                onDismissRequest = { alarmVibrateDurationMenuExpanded = false },
+                                                modifier = Modifier
+                                                    .exposedDropdownSize()
+                                                    .background(MaterialTheme.colorScheme.surface)
+                                            ) {
+                                                alarmDurationOptions.forEach { (durationMs, label) ->
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Text(
+                                                                text = label,
+                                                                color = if (durationMs == alarmVibrateDurationMs) {
+                                                                    if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.onSurface
+                                                                },
+                                                                fontWeight = if (durationMs == alarmVibrateDurationMs) FontWeight.SemiBold else FontWeight.Normal
+                                                            )
+                                                        },
+                                                        onClick = {
+                                                            alarmVibrateDurationMenuExpanded = false
+                                                            alarmVibrateDurationMs = durationMs
+                                                            alertPrefs.edit()
+                                                                .putLong("alarm_vibrate_duration_ms", durationMs)
+                                                                .apply()
+                                                            showToggleMessage("Vibration duration set to $label")
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
 
                                 AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmVibrate5mEnabled) {

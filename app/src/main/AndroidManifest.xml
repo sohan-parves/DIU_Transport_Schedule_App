@@ -60,6 +60,11 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="admin_updates" />
+
+        <!-- Fallback icon for notification-payload messages handled by system -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_fcm_status" />
     </application>
 
 </manifest>

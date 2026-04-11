@@ -38,6 +38,19 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.material.pullrefresh.pullRefresh
+import androidx.compose.material.pullrefresh.rememberPullRefreshState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import com.sohan.diutransportschedule.sync.ACTION_NEW_NOTICE
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 // Firestore Notice (text-only on Spark plan)
 data class AdminNoticeUi(
@@ -51,7 +64,7 @@ data class AdminNoticeUi(
 private const val PREF_ADMIN_NOTICES_CACHE = "admin_notices_cache"
 private const val KEY_CACHED_NOTICES_JSON = "cached_notices_json"
 
-private fun readCachedNotices(ctx: Context): List<AdminNoticeUi> {
+internal fun readCachedNotices(ctx: Context): List<AdminNoticeUi> {
     return try {
         val prefs = ctx.getSharedPreferences(PREF_ADMIN_NOTICES_CACHE, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_CACHED_NOTICES_JSON, "[]") ?: "[]"
@@ -99,14 +112,12 @@ private fun saveCachedNotices(ctx: Context, notices: List<AdminNoticeUi>) {
     }
 }
 
-private const val PREF_NOTICES = "notice_prefs"
+internal const val PREF_NOTICES = "notice_prefs"
+internal const val KEY_LAST_MANUAL_NOTICE_REFRESH_MS = "last_manual_refresh"
 private const val KEY_READ_IDS = "read_ids" // StringSet
 
 private const val KEY_INITIAL_SYNC_DONE = "initial_sync_done"
 private const val KEY_CACHED_NOTICE_VERSION = "cached_notice_version"
-private const val PREF_NOTICE_VERSION_WINDOW = "notice_version_window"
-private const val KEY_NOTICE_WINDOW_DATE = "window_date"
-private const val KEY_NOTICE_WINDOW_SLOT = "window_slot"
 
 
 fun isInitialNoticeSyncDone(ctx: Context): Boolean {
@@ -133,50 +144,29 @@ fun saveCachedNoticeVersion(ctx: Context, version: Long) {
         .apply()
 }
 
-private fun currentNoticeVersionWindowSlot(): Int {
-    val hour = java.time.LocalTime.now().hour
-    return when {
-        hour in 5..11 -> 1
-        hour in 12..16 -> 2
-        hour in 17..23 -> 3
-        else -> 0
-    }
-}
-
-fun canCheckNoticeVersionNow(ctx: Context): Boolean {
-    val slot = currentNoticeVersionWindowSlot()
-    if (slot == 0) return false
-
-    val prefs = ctx.getSharedPreferences(PREF_NOTICE_VERSION_WINDOW, Context.MODE_PRIVATE)
-    val today = java.time.LocalDate.now().toString()
-    val savedDate = prefs.getString(KEY_NOTICE_WINDOW_DATE, "") ?: ""
-    val savedSlot = prefs.getInt(KEY_NOTICE_WINDOW_SLOT, -1)
-
-    return !(savedDate == today && savedSlot == slot)
-}
-
-fun markNoticeVersionCheckedNow(ctx: Context) {
-    val slot = currentNoticeVersionWindowSlot()
-    if (slot == 0) return
-
-    ctx.getSharedPreferences(PREF_NOTICE_VERSION_WINDOW, Context.MODE_PRIVATE)
-        .edit()
-        .putString(KEY_NOTICE_WINDOW_DATE, java.time.LocalDate.now().toString())
-        .putInt(KEY_NOTICE_WINDOW_SLOT, slot)
-        .apply()
-}
-
-
-private fun mergeCachedNotices(ctx: Context, incoming: List<AdminNoticeUi>) {
+fun mergeCachedNotices(ctx: Context, incoming: List<AdminNoticeUi>) {
     val existing = readCachedNotices(ctx)
-    val merged = (existing + incoming)
-        .filter { it.id.isNotBlank() }
-        .groupBy { it.id }
-        .mapNotNull { (_, items) ->
-            items.maxByOrNull { notice ->
-                maxOf(notice.releaseAtMs, notice.createdAtMs)
-            }
+    val mergedMap = LinkedHashMap<String, AdminNoticeUi>()
+
+    for (notice in existing) {
+        if (notice.id.isNotBlank()) {
+            mergedMap[notice.id] = notice
         }
+    }
+
+    for (notice in incoming) {
+        if (notice.id.isBlank()) continue
+        val old = mergedMap[notice.id]
+        mergedMap[notice.id] = if (
+            old == null || maxOf(notice.releaseAtMs, notice.createdAtMs) >= maxOf(old.releaseAtMs, old.createdAtMs)
+        ) {
+            notice
+        } else {
+            old
+        }
+    }
+
+    val merged = mergedMap.values
         .sortedByDescending { maxOf(it.releaseAtMs, it.createdAtMs) }
 
     saveCachedNotices(ctx, merged)
@@ -206,28 +196,84 @@ fun cacheNoticeFromPush(
     setInitialNoticeSyncDone(ctx, true)
 }
 
+internal const val PREF_NOTICE_HOME_POPUP = "notice_home_popup"
+internal const val KEY_LAST_PUSH_NOTICE_ID = "last_push_notice_id"
+private const val KEY_LAST_PUSH_TITLE = "last_push_title"
+private const val KEY_LAST_PUSH_BODY = "last_push_body"
+private const val KEY_LAST_PUSH_DATE_MS = "last_push_date_ms"
+private const val KEY_LAST_SHOWN_NOTICE_POPUP_ON_HOME_ID = "last_shown_notice_popup_on_home_id"
+
+internal data class PendingNoticeHomePopup(
+    val id: String,
+    val title: String,
+    val body: String,
+    val dateMs: Long
+)
+
+/** Called only from FCM when a notice is cached — drives Home “new notice” popup after cold start / resume. */
+internal fun registerNoticePushForHomePopup(
+    ctx: Context,
+    id: String,
+    title: String,
+    body: String,
+    createdAtMs: Long,
+    releaseAtMs: Long
+) {
+    if (id.isBlank() || body.isBlank()) return
+    val dateMs = when {
+        releaseAtMs > 0L || createdAtMs > 0L -> maxOf(releaseAtMs, createdAtMs)
+        else -> System.currentTimeMillis()
+    }
+    ctx.getSharedPreferences(PREF_NOTICE_HOME_POPUP, Context.MODE_PRIVATE).edit()
+        .putString(KEY_LAST_PUSH_NOTICE_ID, id)
+        .putString(KEY_LAST_PUSH_TITLE, title.ifBlank { "Notice" })
+        .putString(KEY_LAST_PUSH_BODY, body)
+        .putLong(KEY_LAST_PUSH_DATE_MS, dateMs)
+        .apply()
+}
+
+internal fun readPendingNoticeHomePopup(ctx: Context): PendingNoticeHomePopup? {
+    val p = ctx.getSharedPreferences(PREF_NOTICE_HOME_POPUP, Context.MODE_PRIVATE)
+    val pushId = p.getString(KEY_LAST_PUSH_NOTICE_ID, "").orEmpty()
+    val shownId = p.getString(KEY_LAST_SHOWN_NOTICE_POPUP_ON_HOME_ID, "").orEmpty()
+    if (pushId.isBlank() || pushId == shownId) return null
+    val body = p.getString(KEY_LAST_PUSH_BODY, "").orEmpty()
+    if (body.isBlank()) return null
+    return PendingNoticeHomePopup(
+        id = pushId,
+        title = p.getString(KEY_LAST_PUSH_TITLE, "").orEmpty().ifBlank { "Notice" },
+        body = body,
+        dateMs = p.getLong(KEY_LAST_PUSH_DATE_MS, 0L)
+    )
+}
+
+internal fun markNoticeHomePopupShown(ctx: Context, id: String) {
+    if (id.isBlank()) return
+    ctx.getSharedPreferences(PREF_NOTICE_HOME_POPUP, Context.MODE_PRIVATE).edit()
+        .putString(KEY_LAST_SHOWN_NOTICE_POPUP_ON_HOME_ID, id)
+        .apply()
+}
+
 
 fun checkAndSyncNoticesFromMeta(
     ctx: Context,
     db: FirebaseFirestore = FirebaseFirestore.getInstance(),
+    forceBypass: Boolean = false,
     onDone: (() -> Unit)? = null,
-    onError: ((String?) -> Unit)? = null
+    onError: ((String?) -> Unit)? = null,
+    onVersionCompared: ((Boolean) -> Unit)? = null
 ) {
-    if (!canCheckNoticeVersionNow(ctx) && isInitialNoticeSyncDone(ctx)) {
-        onDone?.invoke()
-        return
-    }
-
     db.collection("meta")
         .document("notice")
         .get()
         .addOnSuccessListener { metaSnap ->
             val remoteVersion = metaSnap.getLong("version") ?: 0L
             val cachedVersion = readCachedNoticeVersion(ctx)
-            val needsFullSync = !isInitialNoticeSyncDone(ctx) || remoteVersion > cachedVersion
+            val versionChanged = remoteVersion > cachedVersion
+            val needsFullSync = forceBypass || !isInitialNoticeSyncDone(ctx) || versionChanged
 
             if (!needsFullSync) {
-                markNoticeVersionCheckedNow(ctx)
+                onVersionCompared?.invoke(false)
                 onDone?.invoke()
                 return@addOnSuccessListener
             }
@@ -248,7 +294,6 @@ fun checkAndSyncNoticesFromMeta(
                             else -> createdAtMs
                         }
 
-                        if (releaseAtMs > now) return@mapNotNull null
                         if (body.isBlank() && title == "Notice") return@mapNotNull null
 
                         AdminNoticeUi(
@@ -270,14 +315,16 @@ fun checkAndSyncNoticesFromMeta(
 
                     saveCachedNoticeVersion(ctx, remoteVersion)
                     setInitialNoticeSyncDone(ctx, true)
-                    markNoticeVersionCheckedNow(ctx)
+                    onVersionCompared?.invoke(versionChanged)
                     onDone?.invoke()
                 }
                 .addOnFailureListener { e ->
+                    onVersionCompared?.invoke(false)
                     onError?.invoke(e.message)
                 }
         }
         .addOnFailureListener { e ->
+            onVersionCompared?.invoke(false)
             onError?.invoke(e.message)
         }
 }
@@ -295,9 +342,11 @@ private fun saveReadIds(ctx: Context, ids: Set<String>) {
 }
 
 
+@OptIn(androidx.compose.material.ExperimentalMaterialApi::class)
 @Composable
 fun NoticeScreen(pad: PaddingValues) {
     val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     val db = remember { FirebaseFirestore.getInstance() }
 
@@ -308,6 +357,70 @@ fun NoticeScreen(pad: PaddingValues) {
     var readSet by remember { mutableStateOf(readIds(ctx)) }
 
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+
+    var isRefreshing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var lastPullRefreshAt by remember { mutableStateOf(0L) }
+
+    fun applyReadState(list: List<AdminNoticeUi>): List<AdminNoticeUi> {
+        return list.map { it.copy(isRead = readSet.contains(it.id)) }
+    }
+
+    fun refreshFromCache() {
+        error = null
+        readSet = readIds(ctx)
+        notices = applyReadState(
+            readCachedNotices(ctx)
+                .sortedByDescending { maxOf(it.releaseAtMs, it.createdAtMs) }
+        )
+    }
+
+    val pullRefreshState = rememberPullRefreshState(
+        refreshing = isRefreshing,
+        onRefresh = {
+            if (isRefreshing) return@rememberPullRefreshState
+            val now = System.currentTimeMillis()
+            if (now - lastPullRefreshAt < 3000L) return@rememberPullRefreshState
+            lastPullRefreshAt = now
+            isRefreshing = true
+            scope.launch {
+                val prefs = ctx.getSharedPreferences(PREF_NOTICES, Context.MODE_PRIVATE)
+                val lastManualRefresh = prefs.getLong(KEY_LAST_MANUAL_NOTICE_REFRESH_MS, 0L)
+                val now = System.currentTimeMillis()
+
+                if (now - lastManualRefresh > 60 * 60 * 1000L) {
+                    checkAndSyncNoticesFromMeta(
+                        ctx = ctx,
+                        db = db,
+                        forceBypass = false,
+                        onDone = {
+                            prefs.edit().putLong(KEY_LAST_MANUAL_NOTICE_REFRESH_MS, System.currentTimeMillis()).apply()
+                            readSet = readIds(ctx)
+                            refreshFromCache()
+                            notices = applyReadState(
+                                readCachedNotices(ctx)
+                                    .sortedByDescending { maxOf(it.releaseAtMs, it.createdAtMs) }
+                            )
+                            isRefreshing = false
+                        },
+                        onError = { msg ->
+                            if (notices.isEmpty()) error = msg
+                            isRefreshing = false
+                        }
+                    )
+                } else {
+                    readSet = readIds(ctx)
+                    refreshFromCache()
+                    notices = applyReadState(
+                        readCachedNotices(ctx)
+                            .sortedByDescending { maxOf(it.releaseAtMs, it.createdAtMs) }
+                    )
+                    delay(400)
+                    isRefreshing = false
+                }
+            }
+        }
+    )
 
     val unreadCardColors = CardDefaults.cardColors(
         containerColor = if (dark)
@@ -350,42 +463,27 @@ fun NoticeScreen(pad: PaddingValues) {
         }
     }
 
-    fun applyReadState(list: List<AdminNoticeUi>): List<AdminNoticeUi> {
-        return list.map { it.copy(isRead = readSet.contains(it.id)) }
-    }
 
     // Re-apply read state when readSet changes
     LaunchedEffect(readSet) {
         notices = applyReadState(notices)
     }
 
-    fun refreshFromCache() {
-        error = null
-        notices = applyReadState(readCachedNotices(ctx))
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshFromCache()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
-    fun syncAllNoticesOnce() {
-        error = null
-        checkAndSyncNoticesFromMeta(
-            ctx = ctx,
-            db = db,
-            onDone = {
-                readSet = readIds(ctx)
-                notices = readCachedNotices(ctx)
-                refreshFromCache()
-            },
-            onError = { msg ->
-                if (notices.isEmpty()) error = msg
-            }
-        )
-    }
 
     DisposableEffect(Unit) {
         refreshFromCache()
-
-        if (!isInitialNoticeSyncDone(ctx)) {
-            syncAllNoticesOnce()
-        }
 
         val prefs = ctx.getSharedPreferences(PREF_ADMIN_NOTICES_CACHE, Context.MODE_PRIVATE)
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -395,8 +493,33 @@ fun NoticeScreen(pad: PaddingValues) {
         }
         prefs.registerOnSharedPreferenceChangeListener(listener)
 
+        // Extra safety: refresh immediately when push-broadcast arrives,
+        // even if a device delays SharedPreferences change callbacks.
+        val noticeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ACTION_NEW_NOTICE) return
+                refreshFromCache()
+                notices = applyReadState(
+                    readCachedNotices(ctx)
+                        .sortedByDescending { maxOf(it.releaseAtMs, it.createdAtMs) }
+                )
+                error = null
+            }
+        }
+        val noticeFilter = IntentFilter(ACTION_NEW_NOTICE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ctx.registerReceiver(noticeReceiver, noticeFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            ctx.registerReceiver(noticeReceiver, noticeFilter)
+        }
+
         onDispose {
             prefs.unregisterOnSharedPreferenceChangeListener(listener)
+            try {
+                ctx.unregisterReceiver(noticeReceiver)
+            } catch (_: Throwable) {
+            }
         }
     }
 
@@ -412,6 +535,7 @@ fun NoticeScreen(pad: PaddingValues) {
                 )
             )
             .padding(pad)
+            .pullRefresh(pullRefreshState)
     ) {
         Canvas(
             modifier = Modifier.matchParentSize()
@@ -893,5 +1017,12 @@ fun NoticeScreen(pad: PaddingValues) {
                 }
             }
         }
+        
+        androidx.compose.material.pullrefresh.PullRefreshIndicator(
+            refreshing = isRefreshing,
+            state = pullRefreshState,
+            modifier = Modifier.align(Alignment.TopCenter),
+            contentColor = if (dark) Color(0xFF60A5FA) else MaterialTheme.colorScheme.primary
+        )
     }
 }

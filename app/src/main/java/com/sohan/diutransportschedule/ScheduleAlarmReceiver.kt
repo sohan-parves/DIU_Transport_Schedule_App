@@ -62,6 +62,8 @@ private const val NOTICE_ALERT_PREFS = "notice_alert_prefs"
 private const val KEY_ALARM_SOUND_5M = "alarm_sound_5m"
 private const val KEY_ALARM_VIBRATE_5M = "alarm_vibrate_5m"
 private const val KEY_CUSTOM_RINGTONE_URI = "custom_ringtone_uri"
+private const val KEY_ALARM_SOUND_DURATION_MS = "alarm_sound_duration_ms"
+private const val KEY_ALARM_VIBRATE_DURATION_MS = "alarm_vibrate_duration_ms"
 private const val KEY_CUSTOM_RINGTONE_NAME = "custom_ringtone_name"
 private const val KEY_CUSTOM_VIBRATION_PATTERN = "custom_vibration_pattern"
 private const val ALARM_ROUTE_GUARD_PREFS = "alarm_route_guard_prefs"
@@ -209,9 +211,13 @@ object RunningAlertController {
     private const val SAME_ALERT_KEY_WINDOW_MS = 30000L
     private val mainHandler = Handler(Looper.getMainLooper())
     private var localStopRunnable: Runnable? = null
+    private var localSoundStopRunnable: Runnable? = null
+    private var localVibrationStopRunnable: Runnable? = null
     private var screenOffReceiverRegistered = false
     private var volumeObserverRegistered = false
     private var volumeContentObserver: ContentObserver? = null
+    private var volumePollRunnable: Runnable? = null
+    private const val VOLUME_POLL_INTERVAL_MS = 350L
     private var lastAlarmVolume = -1
     private var lastRingVolume = -1
     private var lastMusicVolume = -1
@@ -301,9 +307,32 @@ object RunningAlertController {
             )
             volumeContentObserver = observer
             volumeObserverRegistered = true
+
+            // Fallback for devices where Settings observer is unreliable while locked/screen-off.
+            // If any volume stream changes during alert, stop the running alert immediately.
+            val pollRunnable = object : Runnable {
+                override fun run() {
+                    if (!isAlertRunning) return
+                    try {
+                        if (hasAnyTrackedVolumeChanged(context.applicationContext)) {
+                            RunningAlertController.stop(context.applicationContext)
+                            return
+                        }
+                        captureCurrentVolumes(context.applicationContext)
+                    } catch (_: Throwable) {
+                    }
+                    try {
+                        mainHandler.postDelayed(this, VOLUME_POLL_INTERVAL_MS)
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+            volumePollRunnable = pollRunnable
+            mainHandler.postDelayed(pollRunnable, VOLUME_POLL_INTERVAL_MS)
         } catch (_: Throwable) {
             volumeContentObserver = null
             volumeObserverRegistered = false
+            volumePollRunnable = null
         }
     }
 
@@ -317,6 +346,11 @@ object RunningAlertController {
 
         volumeContentObserver = null
         volumeObserverRegistered = false
+        try {
+            volumePollRunnable?.let { mainHandler.removeCallbacks(it) }
+        } catch (_: Throwable) {
+        }
+        volumePollRunnable = null
         lastAlarmVolume = -1
         lastRingVolume = -1
         lastMusicVolume = -1
@@ -325,25 +359,7 @@ object RunningAlertController {
     }
     fun isRunning(): Boolean = isAlertRunning
 
-    fun stop(context: Context) {
-        try {
-            localStopRunnable?.let { mainHandler.removeCallbacks(it) }
-        } catch (_: Throwable) {
-        }
-        localStopRunnable = null
-
-        // 🔥 Instant cleanup for volume/power button stop
-        unregisterVolumeStopObserver(context.applicationContext)
-
-        try {
-            if (screenOffReceiverRegistered) {
-                context.applicationContext.unregisterReceiver(screenOffStopReceiver)
-                screenOffReceiverRegistered = false
-            }
-        } catch (_: Throwable) {
-            screenOffReceiverRegistered = false
-        }
-
+    private fun stopSoundOnly() {
         try {
             ringtone?.stop()
         } catch (_: Throwable) {
@@ -358,13 +374,42 @@ object RunningAlertController {
         }
         mediaPlayer = null
         ringtone = null
+    }
 
+    private fun stopVibrationOnly() {
         try {
             vibrator?.cancel()
         } catch (_: Throwable) {
         }
         vibrator = null
         vibrating = false
+    }
+
+    fun stop(context: Context) {
+        try {
+            localStopRunnable?.let { mainHandler.removeCallbacks(it) }
+            localSoundStopRunnable?.let { mainHandler.removeCallbacks(it) }
+            localVibrationStopRunnable?.let { mainHandler.removeCallbacks(it) }
+        } catch (_: Throwable) {
+        }
+        localStopRunnable = null
+        localSoundStopRunnable = null
+        localVibrationStopRunnable = null
+
+        // 🔥 Instant cleanup for volume/power button stop
+        unregisterVolumeStopObserver(context.applicationContext)
+
+        try {
+            if (screenOffReceiverRegistered) {
+                context.applicationContext.unregisterReceiver(screenOffStopReceiver)
+                screenOffReceiverRegistered = false
+            }
+        } catch (_: Throwable) {
+            screenOffReceiverRegistered = false
+        }
+
+        stopSoundOnly()
+        stopVibrationOnly()
         isAlertRunning = false
         lastStartElapsedMs = 0L
         currentSessionId = 0L
@@ -416,12 +461,20 @@ object RunningAlertController {
         context: Context,
         soundOn: Boolean,
         vibrateOn: Boolean,
-        durationMs: Long,
+        soundDurationMs: Long,
+        vibrateDurationMs: Long,
         alertKey: String
     ) {
         val nowElapsed = SystemClock.elapsedRealtime()
         val nowWall = System.currentTimeMillis()
         val normalizedAlertKey = alertKey.trim()
+
+        val resolvedSoundDurationMs = soundDurationMs.coerceIn(5_000L, 5 * 60 * 1000L)
+        val resolvedVibrateDurationMs = vibrateDurationMs.coerceIn(5_000L, 5 * 60 * 1000L)
+        val overallDurationMs = maxOf(
+            if (soundOn) resolvedSoundDurationMs else 0L,
+            if (vibrateOn) resolvedVibrateDurationMs else 0L
+        ).coerceAtLeast(5_000L)
 
         // Stronger guard: if the same logical alert arrives again shortly after the first one,
         // never start sound/vibration a second time.
@@ -523,8 +576,39 @@ object RunningAlertController {
         isAlertRunning = soundOn || vibrateOn
 
         // Local in-process fallback timeout handling.
-        // This protects against rare cases where the AlarmManager timeout broadcast is delayed,
-        // blocked by OEM background restrictions, or the notification is tapped while audio is still active.
+        // Sound and vibration can stop independently, with a final cleanup fallback.
+        if (soundOn) {
+            localSoundStopRunnable = Runnable {
+                if (currentSessionId == newSessionId) {
+                    try {
+                        stopSoundOnly()
+                        isAlertRunning = mediaPlayer != null || ringtone != null || vibrating
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+            try {
+                mainHandler.postDelayed(localSoundStopRunnable!!, resolvedSoundDurationMs)
+            } catch (_: Throwable) {
+            }
+        }
+
+        if (vibrateOn) {
+            localVibrationStopRunnable = Runnable {
+                if (currentSessionId == newSessionId) {
+                    try {
+                        stopVibrationOnly()
+                        isAlertRunning = mediaPlayer != null || ringtone != null || vibrating
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+            try {
+                mainHandler.postDelayed(localVibrationStopRunnable!!, resolvedVibrateDurationMs)
+            } catch (_: Throwable) {
+            }
+        }
+
         localStopRunnable = Runnable {
             if (currentSessionId == newSessionId) {
                 try {
@@ -534,7 +618,7 @@ object RunningAlertController {
             }
         }
         try {
-            mainHandler.postDelayed(localStopRunnable!!, durationMs)
+            mainHandler.postDelayed(localStopRunnable!!, overallDurationMs)
         } catch (_: Throwable) {
         }
 
@@ -587,7 +671,7 @@ object RunningAlertController {
         // Keep the notification visible so the user must dismiss it manually.
         try {
             val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val timeoutAt = System.currentTimeMillis() + durationMs
+            val timeoutAt = System.currentTimeMillis() + overallDurationMs
 
             val timeoutIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
                 action = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
@@ -801,6 +885,10 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         val soundOn = masterNotificationsEnabled && prefs.getBoolean(KEY_ALARM_SOUND_5M, true)
         val vibrateOn = masterNotificationsEnabled && prefs.getBoolean(KEY_ALARM_VIBRATE_5M, true)
+        val soundDurationMs = prefs.getLong(KEY_ALARM_SOUND_DURATION_MS, 5_000L)
+            .coerceIn(5_000L, 5 * 60 * 1000L)
+        val vibrateDurationMs = prefs.getLong(KEY_ALARM_VIBRATE_DURATION_MS, 5_000L)
+            .coerceIn(5_000L, 5 * 60 * 1000L)
 
         // Use a HIGH-importance channel based on the current toggle combination.
         // The channels themselves are kept silent in ensureNotificationChannel(),
@@ -814,7 +902,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         Log.d(
             "ScheduleAlarmReceiver",
-            "toggles soundOn=$soundOn vibrateOn=$vibrateOn manualAlert=true channelId=$channelId"
+            "toggles soundOn=$soundOn vibrateOn=$vibrateOn soundDurationMs=$soundDurationMs vibrateDurationMs=$vibrateDurationMs manualAlert=true channelId=$channelId"
         )
 
         val alertKey = buildString {
@@ -1002,7 +1090,8 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
                     context.applicationContext,
                     soundOn = soundOn,
                     vibrateOn = vibrateOn,
-                    durationMs = fiveMinMs,
+                    soundDurationMs = soundDurationMs,
+                    vibrateDurationMs = vibrateDurationMs,
                     alertKey = alertKey
                 )
             } else {

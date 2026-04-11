@@ -106,6 +106,12 @@ import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
 import android.content.res.Configuration
 import androidx.collection.LruCache
 import android.content.SharedPreferences
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 
 sealed class OfflineState {
     data object NotDownloaded : OfflineState()
@@ -460,13 +466,80 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
 
     var showEnableLocationDialog by remember { mutableStateOf(false) }
 
+    val locationPulseTransition = rememberInfiniteTransition(label = "location_pulse")
+    val locationPulseScale by locationPulseTransition.animateFloat(
+        initialValue = 0.75f,
+        targetValue = 1.75f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "location_pulse_scale"
+    )
+    val locationPulseAlpha by locationPulseTransition.animateFloat(
+        initialValue = 0.28f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "location_pulse_alpha"
+    )
+
     LaunchedEffect(isTabActive) {
         if (!isTabActive) {
             requestCenterOnUser = false
         }
     }
 
-    val routeId by SelectedRoadStore.routeIdFlow(ctx).collectAsState(initial = "")
+    val rawRouteId by SelectedRoadStore.routeIdFlow(ctx).collectAsState(initial = "")
+    
+    val routePrefs = remember { ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE) }
+    var selectedFridayRoute by remember { mutableStateOf(routePrefs.getString("selected_friday_route", "ALL").orEmpty()) }
+    DisposableEffect(Unit) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+            if (key == "selected_friday_route") {
+                selectedFridayRoute = prefs.getString("selected_friday_route", "ALL").orEmpty()
+            }
+        }
+        routePrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { routePrefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
+    
+    val todayIsFriday = try {
+        java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+    } catch (_: Throwable) {
+        false
+    }
+    
+    val profileRoutePrefs = remember {
+        ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
+    }
+    val storedDailyRoute = profileRoutePrefs.getString("selected_route", "ALL").orEmpty()
+    val normalizedRawRouteId = rawRouteId.trim().ifBlank { storedDailyRoute.trim().ifBlank { "ALL" } }
+    val normalizedFridayRoute = selectedFridayRoute.trim().ifBlank { "ALL" }
+    val normalizedStoredDailyRoute = storedDailyRoute.trim().ifBlank { "ALL" }
+    val effectiveDailyRoute = when {
+        !normalizedRawRouteId.equals("ALL", ignoreCase = true) &&
+            !normalizedRawRouteId.startsWith("F", ignoreCase = true) -> normalizedRawRouteId
+        !normalizedStoredDailyRoute.equals("ALL", ignoreCase = true) &&
+            !normalizedStoredDailyRoute.startsWith("F", ignoreCase = true) -> normalizedStoredDailyRoute
+        else -> "ALL"
+    }
+
+    val routeId = if (todayIsFriday) {
+        if (
+            normalizedFridayRoute.startsWith("F", ignoreCase = true) &&
+            !normalizedFridayRoute.equals("ALL", ignoreCase = true)
+        ) {
+            normalizedFridayRoute
+        } else {
+            effectiveDailyRoute
+        }
+    } else {
+        effectiveDailyRoute
+    }
+
     val shouldPromptRoadSelection = routeId.isBlank() || routeId.trim().equals("ALL", ignoreCase = true)
     val routeText by SelectedRoadStore.routeTextFlow(ctx).collectAsState(initial = "")
     val style = if (isDark) "dark" else "light"
@@ -1727,6 +1800,7 @@ private fun OsmdroidLiveMap(
     var compassOverlayRef by remember { mutableStateOf<CompassOverlay?>(null) }
     var rotationOverlayRef by remember { mutableStateOf<RotationGestureOverlay?>(null) }
     var livePulseAnimator by remember { mutableStateOf<ValueAnimator?>(null) }
+    var mapLifecycleTick by remember { mutableIntStateOf(0) }
     var offlineTileProviderRef by remember { mutableStateOf<MapTileProviderBase?>(null) }
     var offlineArchiveRef by remember { mutableStateOf<IArchiveFile?>(null) }
     var appliedMbtilesPath by remember { mutableStateOf<String?>(null) }
@@ -1735,6 +1809,7 @@ private fun OsmdroidLiveMap(
     var lastRadarAnimationFrameMs by remember { mutableLongStateOf(0L) }
     var lastRadarPhaseBucket by remember { mutableIntStateOf(-1) }
     var lastGestureRefreshMs by remember { mutableLongStateOf(0L) }
+    var lastMarkerPhaseBucket by remember { mutableIntStateOf(-1) }
     val latestCenterOnUserRequest by rememberUpdatedState(centerOnUserRequest)
     val latestOnCenterConsumed by rememberUpdatedState(onCenterConsumed)
     val latestRoutePoints by rememberUpdatedState(routePoints)
@@ -1758,6 +1833,7 @@ private fun OsmdroidLiveMap(
             lastRenderedLiveLocationKey = null
             lastRadarAnimationFrameMs = 0L
             lastRadarPhaseBucket = -1
+            lastMarkerPhaseBucket = -1
             livePulseAnimator?.cancel()
             livePulseAnimator = null
             hasCenteredOnUserOnce = false
@@ -1834,7 +1910,61 @@ private fun OsmdroidLiveMap(
         }
     }
 
-    fun updateLiveLocationMarker(map: MapView, point: GeoPoint) {
+    fun buildAnimatedLiveLocationMarkerBitmap(phase: Float): android.graphics.Bitmap {
+        val normalizedPhase = phase.coerceIn(0f, 1f)
+        val sizePx = 96
+        val centerX = sizePx / 2f
+        val centerY = sizePx / 2f
+
+        val bitmap = android.graphics.Bitmap.createBitmap(
+            sizePx,
+            sizePx,
+            android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val canvas = android.graphics.Canvas(bitmap)
+
+        val pulseRadius = 16f + (normalizedPhase * 16f)
+        val pulseAlpha = ((1f - normalizedPhase) * 58f).toInt().coerceIn(0, 58)
+        val whiteRingRadius = 9.5f
+        val blueDotRadius = 6.6f
+        val innerGlowRadius = 15f
+        val innerGlowAlpha = (18f + ((1f - normalizedPhase) * 16f)).toInt().coerceIn(0, 34)
+
+        val pulsePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(pulseAlpha, 26, 115, 232)
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        val innerGlowPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(innerGlowAlpha, 26, 115, 232)
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        val whitePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(245, 255, 255, 255)
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        val bluePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.parseColor("#1A73E8")
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        val highlightPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(110, 255, 255, 255)
+            style = android.graphics.Paint.Style.FILL
+        }
+
+        canvas.drawCircle(centerX, centerY, pulseRadius, pulsePaint)
+        canvas.drawCircle(centerX, centerY, innerGlowRadius, innerGlowPaint)
+        canvas.drawCircle(centerX, centerY, whiteRingRadius, whitePaint)
+        canvas.drawCircle(centerX, centerY, blueDotRadius, bluePaint)
+        canvas.drawCircle(centerX - 1.8f, centerY - 1.8f, 1.9f, highlightPaint)
+
+        return bitmap
+    }
+
+    fun updateLiveLocationMarker(map: MapView, point: GeoPoint, phase: Float = 0f) {
         val existingMarker = map.overlays.firstOrNull { overlay ->
             overlay is Marker && overlay.relatedObject == "live_location_marker"
         } as? Marker
@@ -1843,15 +1973,15 @@ private fun OsmdroidLiveMap(
             relatedObject = "live_location_marker"
             title = "Current location"
             infoWindow = null
-            icon = android.graphics.drawable.BitmapDrawable(
-                ctx.resources,
-                getCachedLiveLocationMarkerBitmap(ctx)
-            )
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             alpha = 1f
         }
 
         marker.position = point
+        marker.icon = android.graphics.drawable.BitmapDrawable(
+            ctx.resources,
+            buildAnimatedLiveLocationMarkerBitmap(phase.coerceIn(0f, 1f))
+        )
 
         if (existingMarker == null) {
             map.overlays.add(marker)
@@ -2197,7 +2327,7 @@ private fun OsmdroidLiveMap(
                 overlay is Polygon && overlay.title == "live_location_accuracy_circle"
             }
 
-            updateLiveLocationMarker(map, point)
+            updateLiveLocationMarker(map, point, 0f)
             updateLiveLocationRadar(map, point, 0f)
             lastRenderedLiveLocationKey = listOf(
                 point.latitude,
@@ -2310,10 +2440,15 @@ private fun OsmdroidLiveMap(
 
                 mapViewRef = this
                 onResume()
+                mapLifecycleTick++
             }
         },
         update = { map ->
             mapViewRef = map
+            map.onResume()
+            if (isTabActive && enableLiveLocation && livePulseAnimator == null) {
+                mapLifecycleTick++
+            }
             mapOrientationDeg = map.mapOrientation
             applyTileProvider(map, mbtilesPath)
 
@@ -2348,6 +2483,17 @@ private fun OsmdroidLiveMap(
                 if (lastRenderedRouteSignature != routeSignature) {
                     updateRoutePolylineOverlays(map, routePoints, drawRoadLine)
                     updateRouteStopMarkers(map, routeStopMarkerPoints, routeStopMarkerLabels)
+
+                    lastRenderedLiveLocationKey = null
+                    lastRadarAnimationFrameMs = 0L
+                    lastRadarPhaseBucket = -1
+                    lastMarkerPhaseBucket = -1
+
+                    lastUserLocation?.let { userPoint ->
+                        updateLiveLocationMarker(map, userPoint, 0f)
+                        updateLiveLocationRadar(map, userPoint, 0f)
+                    }
+
                     sortMapOverlays(map)
                     map.invalidate()
                     lastRenderedRouteSignature = routeSignature
@@ -2386,7 +2532,7 @@ private fun OsmdroidLiveMap(
                 ).joinToString("#")
 
                 if (lastRenderedLiveLocationKey != liveLocationKey) {
-                    updateLiveLocationMarker(map, userPoint)
+                    updateLiveLocationMarker(map, userPoint, 0f)
                     updateLiveLocationRadar(map, userPoint, 0f)
                     lastRenderedLiveLocationKey = liveLocationKey
                 }
@@ -2406,14 +2552,15 @@ private fun OsmdroidLiveMap(
             }
         )
 
-    DisposableEffect(enableLiveLocation, mapViewRef) {
+    DisposableEffect(enableLiveLocation, mapViewRef, routeId, routeText, isTabActive, mapLifecycleTick) {
         val map = mapViewRef
 
-        if (!enableLiveLocation || map == null) {
+        if (!enableLiveLocation || !isTabActive || map == null) {
             livePulseAnimator?.cancel()
             livePulseAnimator = null
             lastRadarAnimationFrameMs = 0L
             lastRadarPhaseBucket = -1
+            lastMarkerPhaseBucket = -1
             onDispose { }
         } else {
             livePulseAnimator?.cancel()
@@ -2435,6 +2582,10 @@ private fun OsmdroidLiveMap(
                     lastRadarPhaseBucket = phaseBucket
 
                     lastUserLocation?.let { point ->
+                        if (phaseBucket != lastMarkerPhaseBucket) {
+                            updateLiveLocationMarker(map, point, phase)
+                            lastMarkerPhaseBucket = phaseBucket
+                        }
                         updateLiveLocationRadar(map, point, phase)
                         map.invalidate()
                     }
@@ -2448,11 +2599,29 @@ private fun OsmdroidLiveMap(
                 animator.cancel()
                 lastRadarAnimationFrameMs = 0L
                 lastRadarPhaseBucket = -1
+                lastMarkerPhaseBucket = -1
                 if (livePulseAnimator === animator) {
                     livePulseAnimator = null
                 }
             }
         }
+    }
+
+    LaunchedEffect(routeId, routeText, enableLiveLocation, isTabActive) {
+        if (!enableLiveLocation || !isTabActive) return@LaunchedEffect
+
+        val map = mapViewRef ?: return@LaunchedEffect
+        val userPoint = lastUserLocation ?: return@LaunchedEffect
+
+        lastRenderedLiveLocationKey = null
+        lastRadarAnimationFrameMs = 0L
+        lastRadarPhaseBucket = -1
+        lastMarkerPhaseBucket = -1
+
+        updateLiveLocationMarker(map, userPoint, 0f)
+        updateLiveLocationRadar(map, userPoint, 0f)
+        sortMapOverlays(map)
+        map.invalidate()
     }
 
     val normalizedMapRotation = ((mapOrientationDeg % 360f) + 360f) % 360f
@@ -2612,6 +2781,7 @@ private fun OsmdroidLiveMap(
             lastRenderedLiveLocationKey = null
             lastRadarAnimationFrameMs = 0L
             lastRadarPhaseBucket = -1
+            lastMarkerPhaseBucket = -1
             livePulseAnimator?.cancel()
             livePulseAnimator = null
             hasCenteredOnUserOnce = false
@@ -2693,6 +2863,7 @@ private fun OsmdroidLiveMap(
             lastRenderedLiveLocationKey = null
             lastRadarAnimationFrameMs = 0L
             lastRadarPhaseBucket = -1
+            lastMarkerPhaseBucket = -1
             lastGestureRefreshMs = 0L
             routeStopMarkerBitmapCache.evictAll()
             liveLocationMarkerBitmapCache.evictAll()

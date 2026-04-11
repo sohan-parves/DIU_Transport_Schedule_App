@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.sohan.diutransportschedule.db.DbScheduleItem
 import com.sohan.diutransportschedule.db.JsonConverters
 import com.sohan.diutransportschedule.sync.ScheduleRepository
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -100,6 +101,54 @@ class HomeViewModel(
         selectedFridayRoute.value = if (saved.isBlank()) "ALL" else saved
     }
 
+    private fun syncNoticeMetaWithHomeAutoScan(context: Context?) {
+        if (context == null) return
+
+        checkAndSyncNoticesFromMeta(
+            ctx = context,
+            db = FirebaseFirestore.getInstance(),
+            forceBypass = false,
+            onDone = { },
+            onError = { },
+            onVersionCompared = { noticeUpdated ->
+                if (noticeUpdated) {
+                    _syncStatusMessage.value = "A new notice এসেছে"
+                }
+            }
+        )
+    }
+
+    private fun effectiveMapRoute(
+        selectedDailyRoute: String,
+        selectedFridayRoute: String
+    ): String {
+        val todayIsFriday = try {
+            java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+        } catch (_: Throwable) {
+            false
+        }
+
+        val daily = selectedDailyRoute.trim().ifBlank { "ALL" }
+        val friday = selectedFridayRoute.trim().ifBlank { "ALL" }
+
+        return if (todayIsFriday) {
+            // If user did NOT select any Friday route, show the full Friday schedule.
+            // (Daily route selection should not hide Friday-only routes.)
+            if (friday.equals("ALL", ignoreCase = true)) {
+                "ALL"
+            } else if (friday.startsWith("F", ignoreCase = true)) {
+                friday
+            } else {
+                "ALL"
+            }
+        } else {
+            if (!daily.startsWith("F", ignoreCase = true)) {
+                daily
+            } else {
+                "ALL"
+            }
+        }
+    }
 
     private fun readAutoLastSlot(context: Context?): Pair<String, Int> {
         val prefs = firestoreWindowPrefs(context)
@@ -221,6 +270,18 @@ class HomeViewModel(
         opts.firstOrNull { it.routeNo.equals(sel, ignoreCase = true) }?.label ?: sel
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "All Routes")
 
+    val effectiveSelectedRouteForToday: StateFlow<String> =
+        combine(selectedRoute, selectedFridayRoute) { daily, friday ->
+            effectiveMapRoute(
+                selectedDailyRoute = daily,
+                selectedFridayRoute = friday
+            )
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            "ALL"
+        )
+
     init {
         viewModelScope.launch { repo.ensureDefaultPrefs() }
 
@@ -257,54 +318,24 @@ class HomeViewModel(
                 false
             }
 
-            val normalizedFridayRoute = fridayRoute.trim()
-            val fridayAllSelected = normalizedFridayRoute.isBlank() || normalizedFridayRoute.equals("ALL", ignoreCase = true)
-            val noFilterHome = rawQuery.isBlank() && route.equals("ALL", ignoreCase = true)
+            val normalizedDailyRoute = route.trim().ifBlank { "ALL" }
+            val normalizedFridayRoute = fridayRoute.trim().ifBlank { "ALL" }
+            val effectiveRoute = effectiveMapRoute(
+                selectedDailyRoute = normalizedDailyRoute,
+                selectedFridayRoute = normalizedFridayRoute
+            )
+
+            val dayFilteredList = if (todayIsFriday) {
+                list.filter { it.appliesOn == "FRIDAY" }
+            } else {
+                list.filter { !it.appliesOn.equals("FRIDAY", ignoreCase = true) }
+            }
 
             val base = when {
-                // SEARCH: always show everything
                 rawQuery.isNotEmpty() -> list
-
-                // HOME (no filter): show all daily routes, plus Friday routes.
-                // If a specific Friday route is selected, include only that Friday route.
-                noFilterHome -> {
-                    val dailyItems = list.filter { it.appliesOn != "FRIDAY" }
-                    val fridayItems = if (fridayAllSelected) {
-                        list.filter { it.appliesOn == "FRIDAY" }
-                    } else {
-                        list.filter {
-                            it.appliesOn == "FRIDAY" &&
-                                    it.routeNo.equals(normalizedFridayRoute, ignoreCase = true)
-                        }
-                    }
-                    dailyItems + fridayItems
-                }
-
-                // FILTERED (route selected): apply day rule
-                else -> {
-                    val routeFiltered = if (route.equals("ALL", ignoreCase = true)) {
-                        list
-                    } else {
-                        list.filter { it.routeNo.equals(route, ignoreCase = true) }
-                    }
-
-                    if (todayIsFriday) {
-                        if (route.equals("ALL", ignoreCase = true)) {
-                            routeFiltered.filter { it.appliesOn == "FRIDAY" }
-                        } else if (route.trim().startsWith("F", ignoreCase = true)) {
-                            routeFiltered.filter { it.appliesOn == "FRIDAY" }
-                        } else {
-                            emptyList()
-                        }
-                    } else {
-                        if (route.equals("ALL", ignoreCase = true)) {
-                            routeFiltered.filter { it.appliesOn != "FRIDAY" }
-                        } else if (route.trim().startsWith("F", ignoreCase = true)) {
-                            emptyList()
-                        } else {
-                            routeFiltered.filter { it.appliesOn != "FRIDAY" }
-                        }
-                    }
+                effectiveRoute.equals("ALL", ignoreCase = true) -> dayFilteredList
+                else -> dayFilteredList.filter {
+                    it.routeNo.equals(effectiveRoute, ignoreCase = true)
                 }
             }
 
@@ -317,7 +348,6 @@ class HomeViewModel(
                         it.departureTimes.any { t -> t.lowercase().contains(qq) }
             }
 
-            // DAILY first, FRIDAY at the end
             filtered.sortedWith(
                 compareBy<UiSchedule> { it.appliesOn.equals("FRIDAY", ignoreCase = true) }
                     .thenBy { it.routeNo }
@@ -336,6 +366,15 @@ class HomeViewModel(
         _syncStatusMessage.value = ""
     }
 
+    fun showInlineUpdateFromPush(title: String, body: String) {
+        val t = title.trim()
+        val b = body.trim()
+        if (b.isBlank()) return
+
+        _updateMessage.value = if (t.isBlank()) b else "$t\n$b"
+        _showUpdate.value = true
+    }
+
     private fun hasInternetConnection(context: Context?): Boolean {
         if (context == null) return false
 
@@ -352,7 +391,8 @@ class HomeViewModel(
         showBannerIfUpdated: Boolean,
         allowDataRead: Boolean,
         context: Context?,
-        isManualRefresh: Boolean
+        isManualRefresh: Boolean,
+        showSyncingUi: Boolean = true
     ) {
         syncMutex.withLock {
             if (_isSyncing.value) return
@@ -376,23 +416,29 @@ class HomeViewModel(
                     hasInternetConnection(context)
                 } ?: false
             }
+            // First install / empty local DB should bypass time-window gating
+            // so the app can perform a full remote read immediately.
+            val allowFirstInstallFullRead = allowDataRead && hasInternet && !hasLocalData
             val currentAutoSlot = currentAutoReadableSlotOrNone()
             val manualWithinReadInterval =
                 now - manualLastRemoteReadAtMillis >= manualRemoteReadIntervalMillis
-            val manualRemoteAllowed = hasInternet && manualWithinReadInterval
+            val manualRemoteAllowed = allowFirstInstallFullRead || (hasInternet && manualWithinReadInterval)
 
             val autoSlotAvailable = hasInternet && currentAutoSlot != 0 && isAutoSlotAvailable(context)
             val shouldCheckRemoteForAuto = isAutoRefresh && allowDataRead && autoSlotAvailable
 
-            val autoRemoteAllowed = shouldCheckRemoteForAuto
+            val autoRemoteAllowed = allowFirstInstallFullRead || shouldCheckRemoteForAuto
 
             val allowRemoteRead = allowDataRead && when {
+                allowFirstInstallFullRead -> true
                 isManualRefresh -> manualRemoteAllowed
                 else -> autoRemoteAllowed
             }
 
 
-            _isSyncing.value = true
+            if (showSyncingUi) {
+                _isSyncing.value = true
+            }
             var remoteReadSucceeded = false
 
             val autoSlotUsedForThisAttempt = currentAutoSlot
@@ -419,6 +465,10 @@ class HomeViewModel(
 
                 if (allowRemoteRead) {
                     remoteReadSucceeded = true
+
+                    if (isAutoRefresh) {
+                        syncNoticeMetaWithHomeAutoScan(context)
+                    }
 
                     if (!hasLocalData) {
                         val localReadyNow = try {
@@ -456,7 +506,9 @@ class HomeViewModel(
                     }
                 }
                 _initialUiReady.value = true
-                _isSyncing.value = false
+                if (showSyncingUi) {
+                    _isSyncing.value = false
+                }
             }
         }
     }
@@ -504,6 +556,28 @@ class HomeViewModel(
                 allowDataRead = allowDataRead,
                 context = context,
                 isManualRefresh = isManualRefresh
+            )
+        }
+    }
+
+    fun refreshFromLocalOnceIfAvailable(context: Context? = null) {
+        viewModelScope.launch {
+            val hasLocalData = try {
+                repo.hasReadableLocalData()
+            } catch (_: Throwable) {
+                false
+            }
+
+            if (!hasLocalData) return@launch
+
+            _initialUiReady.value = true
+
+            performRefresh(
+                showBannerIfUpdated = false,
+                allowDataRead = false,
+                context = context,
+                isManualRefresh = false,
+                showSyncingUi = false
             )
         }
     }

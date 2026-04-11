@@ -75,7 +75,11 @@ fun MainNav(
                     .background(if (currentRoute == "home") MaterialTheme.colorScheme.background else Color.Transparent)
             ) {
                 saveableStateHolder.SaveableStateProvider("home") {
-                    HomeScreen(vm = vm, pad = pad)
+                    HomeScreen(
+                        vm = vm,
+                        pad = pad,
+                        onOpenNotice = { navigateInstant("notice") }
+                    )
                 }
             }
 
