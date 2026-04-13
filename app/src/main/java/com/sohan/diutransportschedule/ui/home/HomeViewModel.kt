@@ -756,7 +756,7 @@ private object RouteNotificationScheduler {
             .distinct()
             .forEach { requestCode ->
                 val intent = Intent(context, RouteAlarmReceiver::class.java).apply {
-                    Intent.setAction = "ROUTE_ALARM"
+                    this.action = "ROUTE_ALARM"
                 }
 
                 val pi = PendingIntent.getBroadcast(
@@ -861,7 +861,7 @@ private object RouteNotificationScheduler {
             val requestCode = (routeNo.hashCode() * 31) + minutesOfDay + (kind.hashCode() * 17)
 
             val intent = Intent(context, RouteAlarmReceiver::class.java).apply {
-                Intent.setAction = "ROUTE_ALARM"
+                this.action = "ROUTE_ALARM"
                 putExtra("routeNo", routeNo)
                 putExtra("kind", kind)
                 putExtra("timeText", formatTime(time))

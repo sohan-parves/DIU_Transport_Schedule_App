@@ -1628,7 +1628,7 @@ private fun createRouteStopMarkerBitmap(
     val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = textColor
         this.textSize = textSize
-        Paint.setTypeface = Typeface.create(
+        typeface = Typeface.create(
             Typeface.DEFAULT,
             Typeface.BOLD
         )
@@ -1653,7 +1653,7 @@ private fun createRouteStopMarkerBitmap(
 
     val baseShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.argb(55, 0, 0, 0)
-        Paint.setMaskFilter = BlurMaskFilter(10f * density, BlurMaskFilter.Blur.NORMAL)
+        maskFilter = BlurMaskFilter(10f * density, BlurMaskFilter.Blur.NORMAL)
     }
 
     val baseShadowRect = RectF(
@@ -1687,7 +1687,7 @@ private fun createRouteStopMarkerBitmap(
 
         val pinShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(90, 0, 0, 0)
-            Paint.setMaskFilter = BlurMaskFilter(8f * density, BlurMaskFilter.Blur.NORMAL)
+            maskFilter = BlurMaskFilter(8f * density, BlurMaskFilter.Blur.NORMAL)
         }
         canvas.drawOval(
             RectF(
@@ -1700,7 +1700,7 @@ private fun createRouteStopMarkerBitmap(
         )
 
         val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            Paint.setShader = LinearGradient(
+            shader = LinearGradient(
                 pinLeft,
                 pinTop,
                 pinLeft,
@@ -1737,7 +1737,7 @@ private fun createMyLocationMarkerBitmap(ctx: Context): Bitmap {
 
     val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.argb(55, 0, 0, 0)
-        Paint.setMaskFilter = BlurMaskFilter(4f * density, BlurMaskFilter.Blur.NORMAL)
+        maskFilter = BlurMaskFilter(4f * density, BlurMaskFilter.Blur.NORMAL)
     }
     val outerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
@@ -2577,7 +2577,7 @@ private fun OsmdroidLiveMap(
             livePulseAnimator?.cancel()
 
             val animator = ValueAnimator.ofFloat(0f, 1f).apply {
-                ValueAnimator.setDuration = 1800L
+                duration = 1800L
                 repeatCount = ValueAnimator.INFINITE
                 interpolator = LinearInterpolator()
                 addUpdateListener { valueAnimator ->

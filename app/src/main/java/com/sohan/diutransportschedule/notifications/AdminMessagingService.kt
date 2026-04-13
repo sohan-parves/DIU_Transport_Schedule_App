@@ -142,7 +142,7 @@ class AdminMessagingService : FirebaseMessagingService() {
                 )
                 try {
                     val noticeIntent = Intent(ACTION_NEW_NOTICE).apply {
-                        Intent.setPackage = applicationContext.packageName
+                        `package` = applicationContext.packageName
                         putExtra("id", id)
                         putExtra("title", title)
                         putExtra("body", body)
@@ -179,7 +179,7 @@ class AdminMessagingService : FirebaseMessagingService() {
             }
             try {
                 val msgIntent = Intent(ACTION_NEW_ADMIN_MESSAGE).apply {
-                    Intent.setPackage = applicationContext.packageName
+                    `package` = applicationContext.packageName
                     putExtra("title", title)
                     putExtra("body", body)
                 }

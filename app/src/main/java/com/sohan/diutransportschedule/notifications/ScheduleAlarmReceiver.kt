@@ -425,8 +425,8 @@ object RunningAlertController {
             val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
             val stopIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-                Intent.setAction = ACTION_STOP_RUNNING_ALERT_INTERNAL
-                Intent.setData = Uri.parse("diu://stop_running_alert")
+                action = ACTION_STOP_RUNNING_ALERT_INTERNAL
+                data = Uri.parse("diu://stop_running_alert")
             }
             val stopPi = PendingIntent.getBroadcast(
                 context,
@@ -441,8 +441,8 @@ object RunningAlertController {
             }
 
             val autoOpenIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-                Intent.setAction = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
-                Intent.setData = Uri.parse("diu://auto_open_after_timeout")
+                action = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
+                data = Uri.parse("diu://auto_open_after_timeout")
             }
             val autoOpenPi = PendingIntent.getBroadcast(
                 context,
@@ -676,8 +676,8 @@ object RunningAlertController {
             val timeoutAt = System.currentTimeMillis() + overallDurationMs
 
             val timeoutIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-                Intent.setAction = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
-                Intent.setData = Uri.parse("diu://auto_open_after_timeout")
+                action = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
+                data = Uri.parse("diu://auto_open_after_timeout")
             }
             val timeoutPi = PendingIntent.getBroadcast(
                 context,
@@ -1016,7 +1016,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             ?.apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 putExtra("stop_current_alarm", true)
-                Intent.setData = Uri.parse("diu://tap_open_and_stop/${System.currentTimeMillis()}")
+                data = Uri.parse("diu://tap_open_and_stop/${System.currentTimeMillis()}")
             }
 
         val contentPi = PendingIntent.getActivity(
@@ -1030,8 +1030,8 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         // Stop action
         val stopIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-            setAction(ACTION_STOP_SCHEDULE_ALARM)
-            Intent.setData = Uri.parse("diu://stop_schedule_alarm")
+            this.action = ACTION_STOP_SCHEDULE_ALARM
+            this.data = Uri.parse("diu://stop_schedule_alarm")
         }
         val stopPi = PendingIntent.getBroadcast(
             context,

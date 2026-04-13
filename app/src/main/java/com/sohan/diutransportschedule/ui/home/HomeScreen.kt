@@ -85,7 +85,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import java.time.Instant
 import java.time.ZoneId
-// Removed WindowInsets, asPaddingValues, calculateTopPadding (not supported in this Compose version)
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.DisposableEffect
