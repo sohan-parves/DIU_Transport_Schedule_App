@@ -1037,10 +1037,9 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         val builder = NotificationCompat.Builder(context, channelId)
             // ✅ Right side logo remove: small icon generic (MIUI header এ DIU logo দেখাবে না)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setSmallIcon(android.R.drawable.screen_background_dark_transparent)
             .setColorized(true)
             .setColor(COLOR_DEEP_BLUE)   // deep blue base
-            .setLargeIcon(largeLogo)          // ✅ left logo
             // Collapsed view
             .setContentTitle(collapsedTitle)
             .setContentText(collapsedText)

@@ -822,7 +822,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Profile",
+                        text = "Settings",
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.Bold,
                         color = primaryText
@@ -1636,7 +1636,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                         AnimatedVisibility(visible = effectiveNotificationsEnabled) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    text = "Notify me ${notifyLeadMinutes} minutes before",
+                                    text = "Notify me ${notifyLeadMinutesDraft.toInt().coerceIn(5, 120)} minutes before",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = primaryText
                                 )

@@ -4,6 +4,7 @@ import android.content.Context
 
 private const val PREF_WELCOME_GUIDE = "welcome_guide_prefs"
 private const val KEY_WELCOME_GUIDE_SHOWN = "welcome_guide_shown"
+const val FIRST_INSTALL_GUIDE_ENABLED = true
 
 object AppFeatureGuideContent {
     val model = AppFeatureGuideModel(
@@ -39,6 +40,8 @@ object AppFeatureGuideContent {
 }
 
 fun shouldShowWelcomeGuide(context: Context): Boolean {
+    if (!FIRST_INSTALL_GUIDE_ENABLED) return false
+
     val prefs = context.getSharedPreferences(PREF_WELCOME_GUIDE, Context.MODE_PRIVATE)
     return !prefs.getBoolean(KEY_WELCOME_GUIDE_SHOWN, false)
 }

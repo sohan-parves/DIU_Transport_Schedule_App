@@ -5,6 +5,7 @@ import com.sohan.diutransportschedule.BuildConfig
 
 const val PREF_FEATURE_GUIDE = "feature_guide_prefs"
 const val KEY_FEATURE_GUIDE_LAST_VERSION = "feature_guide_last_version"
+const val UPDATE_GUIDE_ENABLED = false
 
 object AppUpdateFeatureGuideContent {
     val model = AppFeatureGuideModel(
@@ -24,6 +25,8 @@ object AppUpdateFeatureGuideContent {
 }
 
 fun shouldShowUpdateGuide(context: Context): Boolean {
+    if (!UPDATE_GUIDE_ENABLED) return false
+
     val prefs = context.getSharedPreferences(PREF_FEATURE_GUIDE, Context.MODE_PRIVATE)
     val lastSeenVersion = prefs.getInt(KEY_FEATURE_GUIDE_LAST_VERSION, -1)
     return lastSeenVersion != -1 && lastSeenVersion != BuildConfig.VERSION_CODE

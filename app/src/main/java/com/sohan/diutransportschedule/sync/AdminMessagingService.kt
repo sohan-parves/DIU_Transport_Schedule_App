@@ -295,16 +295,22 @@ class AdminMessagingService : FirebaseMessagingService() {
     ) {
         val appContext = context.applicationContext
 
+        val notifPrefs = appContext.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
+        val vibrationEnabled = notifPrefs.getBoolean("master_notifications_enabled", true) &&
+            notifPrefs.getBoolean("alarm_vibrate_5m", true)
+
         // Android 8+ channel
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
             val existing = nm.getNotificationChannel(ADMIN_MSG_CHANNEL_ID)
 
-            // Ensure this channel is SILENT: schedule alarms handle ring/vibration themselves.
-            // (Channel sound/vibration are immutable once created.)
+            // Ensure this channel is configured for heads-up + vibration.
+            // (Channel sound/vibration/importance are immutable once created.)
             val needsRecreate = existing != null && (
-                existing.sound != null || existing.shouldVibrate()
+                existing.importance < NotificationManager.IMPORTANCE_HIGH ||
+                existing.sound != null ||
+                existing.shouldVibrate() != vibrationEnabled
             )
             if (needsRecreate) {
                 try {
@@ -316,10 +322,15 @@ class AdminMessagingService : FirebaseMessagingService() {
             val channel = NotificationChannel(
                 ADMIN_MSG_CHANNEL_ID,
                 "Admin messages",
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Transport notices and important admin updates"
-                enableVibration(false)
+                enableVibration(vibrationEnabled)
+                if (vibrationEnabled) {
+                    vibrationPattern = longArrayOf(0, 250, 180, 250)
+                } else {
+                    vibrationPattern = longArrayOf(0)
+                }
                 setSound(null, null)
                 setShowBadge(true)
                 lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
@@ -350,14 +361,26 @@ class AdminMessagingService : FirebaseMessagingService() {
             .setSmallIcon(R.drawable.ic_fcm_status)
             .setContentTitle(title)
             .setContentText(body)
+            .setTicker(title)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            // Keep admin push silent; only schedule alarms should ring/vibrate.
-            .setDefaults(0)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
 
-        if (pending != null) builder.setContentIntent(pending)
+        if (pending != null) {
+            builder.setContentIntent(pending)
+            builder.setFullScreenIntent(pending, false)
+        }
+        builder.setOnlyAlertOnce(false)
+
+        if (vibrationEnabled) {
+            builder.setVibrate(longArrayOf(0, 250, 180, 250))
+            builder.setDefaults(NotificationCompat.DEFAULT_VIBRATE)
+        } else {
+            builder.setVibrate(longArrayOf(0))
+            builder.setDefaults(0)
+        }
 
         val notif = builder.build()
 
