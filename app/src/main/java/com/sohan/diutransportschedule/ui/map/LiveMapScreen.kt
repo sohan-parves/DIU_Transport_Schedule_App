@@ -1,4 +1,4 @@
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.ui.map
 import androidx.lifecycle.Observer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MyLocation
@@ -21,7 +21,6 @@ import android.location.LocationManager
 import android.content.Intent
 import android.provider.Settings
 import com.google.android.gms.tasks.CancellationTokenSource
-import android.graphics.drawable.BitmapDrawable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -39,7 +38,6 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.work.*
 import com.google.android.gms.location.*
 import kotlinx.coroutines.flow.map
-import org.osmdroid.config.Configuration as OsmConfiguration
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
@@ -55,18 +53,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
-import android.graphics.drawable.ShapeDrawable
-import android.graphics.drawable.shapes.OvalShape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import com.sohan.diutransportschedule.R
-import androidx.core.graphics.drawable.toBitmap
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -77,9 +71,7 @@ import androidx.compose.ui.zIndex
 import org.osmdroid.events.MapListener
 import org.osmdroid.events.ScrollEvent
 import org.osmdroid.events.ZoomEvent
-import androidx.compose.material.icons.filled.Explore
 import androidx.compose.ui.draw.rotate
-import kotlin.math.abs
 import androidx.compose.material3.Text
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -103,15 +95,34 @@ import org.osmdroid.tileprovider.modules.MapTileModuleProviderBase
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
-import android.content.res.Configuration
 import androidx.collection.LruCache
 import android.content.SharedPreferences
+import android.content.res.Configuration
+import android.graphics.BlurMaskFilter
+import android.graphics.LinearGradient
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
+import android.os.SystemClock
+import android.util.Log
+import android.view.Surface
+import android.view.WindowManager
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import com.sohan.diutransportschedule.workers.MbtilesDownloadWorker
+import org.osmdroid.util.TileSystem
+import java.net.HttpURLConnection
+import java.net.URL
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.LocalTime
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import kotlin.collections.get
 
 sealed class OfflineState {
     data object NotDownloaded : OfflineState()
@@ -211,7 +222,7 @@ private const val PREF_FIRST_INSTALL_MAP_SYNC = "first_install_map_sync"
 private const val KEY_FIRST_INSTALL_MAP_SYNC_DONE = "first_install_map_sync_done"
 
 private fun currentFirestoreWindowSlotForMap(): Int {
-    val hour = java.time.LocalTime.now().hour
+    val hour = LocalTime.now().hour
     return when {
         hour in 5..11 -> 1   // Morning
         hour in 12..16 -> 2  // Noon
@@ -225,7 +236,7 @@ private fun canUseFirestoreWindowForMap(context: Context): Boolean {
     if (slot == 0) return false
 
     val prefs = context.getSharedPreferences(PREF_FIRESTORE_WINDOW_MAP, Context.MODE_PRIVATE)
-    val today = java.time.LocalDate.now().toString()
+    val today = LocalDate.now().toString()
     val savedDate = prefs.getString(KEY_FIRESTORE_WINDOW_DATE_MAP, "") ?: ""
     val savedSlot = prefs.getInt(KEY_FIRESTORE_WINDOW_SLOT_MAP, -1)
 
@@ -238,7 +249,7 @@ private fun markFirestoreWindowUsedForMap(context: Context) {
 
     context.getSharedPreferences(PREF_FIRESTORE_WINDOW_MAP, Context.MODE_PRIVATE)
         .edit()
-        .putString(KEY_FIRESTORE_WINDOW_DATE_MAP, java.time.LocalDate.now().toString())
+        .putString(KEY_FIRESTORE_WINDOW_DATE_MAP, LocalDate.now().toString())
         .putInt(KEY_FIRESTORE_WINDOW_SLOT_MAP, slot)
         .apply()
 }
@@ -507,7 +518,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
     }
     
     val todayIsFriday = try {
-        java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+        LocalDate.now().dayOfWeek == DayOfWeek.FRIDAY
     } catch (_: Throwable) {
         false
     }
@@ -566,7 +577,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
     }
     var lastDoneBytes by remember(style) { mutableStateOf(0L) }
     var lastTotalBytes by remember(style) { mutableStateOf(-1L) }
-    var currentDownloadWorkId by remember(style) { mutableStateOf<java.util.UUID?>(null) }
+    var currentDownloadWorkId by remember(style) { mutableStateOf<UUID?>(null) }
     var mapVersionLabel by remember(style) { mutableStateOf("") }
     var checkingForMapUpdates by remember(style) { mutableStateOf(false) }
 
@@ -614,7 +625,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                     withContext(Dispatchers.IO) {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                             var gp: GeoPoint? = null
-                            val latch = java.util.concurrent.CountDownLatch(1)
+                            val latch = CountDownLatch(1)
                             geocoder.getFromLocationName(query, 1) { addresses ->
                                 val a = addresses.firstOrNull()
                                 if (a != null) gp = GeoPoint(a.latitude, a.longitude)
@@ -746,12 +757,12 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 val coords = "${a.longitude},${a.latitude};${b.longitude},${b.latitude}"
                 val url = "https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=geojson"
 
-                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                val conn = URL(url).openConnection() as HttpURLConnection
                 conn.connectTimeout = 8000
                 conn.readTimeout = 8000
 
                 val text = conn.inputStream.bufferedReader().use { it.readText() }
-                val json = org.json.JSONObject(text)
+                val json = JSONObject(text)
                 val routes = json.optJSONArray("routes") ?: return listOf(a, b)
                 if (routes.length() == 0) return listOf(a, b)
 
@@ -1004,7 +1015,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 routeText.isNotBlank() -> routeText.substringAfter("—", routeText).trim()
                 else -> ""
             }
-            android.util.Log.d(
+            Log.d(
                 "LiveMap",
                 "routeId=$routeId wantedRouteNo=$wantedRouteNo entries=${entries.size} matched=${matched != null} routeMapFound=${routeMapData != null}"
             )
@@ -1541,7 +1552,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
 private val routeStopMarkerBitmapCache = object : LruCache<String, Bitmap>(160) {}
 private val liveLocationMarkerBitmapCache = object : LruCache<String, Bitmap>(8) {}
 private fun buildLiveLocationMarkerCacheKey(ctx: Context): String {
-    val nightMode = ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+    val nightMode = ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
     val densityBucket = (ctx.resources.displayMetrics.density * 100).toInt()
     return "$nightMode#$densityBucket"
 }
@@ -1558,7 +1569,7 @@ private fun getCachedLiveLocationMarkerBitmap(ctx: Context): Bitmap {
 }
 
 private fun buildRouteStopMarkerCacheKey(ctx: Context, label: String): String {
-    val nightMode = ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+    val nightMode = ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
     val densityBucket = (ctx.resources.displayMetrics.density * 100).toInt()
     return "$nightMode#$densityBucket#${label.trim()}"
 }
@@ -1595,7 +1606,7 @@ private fun createRouteStopMarkerBitmap(
     label: String
 ): Bitmap {
     val density = ctx.resources.displayMetrics.density
-    val isDark = (ctx.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
+    val isDark = (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
     val bubbleColor = if (isDark) android.graphics.Color.parseColor("#0A1F44") else android.graphics.Color.WHITE
     val textColor = if (isDark) android.graphics.Color.WHITE else android.graphics.Color.parseColor("#111111")
@@ -1617,9 +1628,9 @@ private fun createRouteStopMarkerBitmap(
     val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = textColor
         this.textSize = textSize
-        typeface = android.graphics.Typeface.create(
-            android.graphics.Typeface.DEFAULT,
-            android.graphics.Typeface.BOLD
+        Paint.setTypeface = Typeface.create(
+            Typeface.DEFAULT,
+            Typeface.BOLD
         )
     }
 
@@ -1642,7 +1653,7 @@ private fun createRouteStopMarkerBitmap(
 
     val baseShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.argb(55, 0, 0, 0)
-        maskFilter = android.graphics.BlurMaskFilter(10f * density, android.graphics.BlurMaskFilter.Blur.NORMAL)
+        Paint.setMaskFilter = BlurMaskFilter(10f * density, BlurMaskFilter.Blur.NORMAL)
     }
 
     val baseShadowRect = RectF(
@@ -1676,7 +1687,7 @@ private fun createRouteStopMarkerBitmap(
 
         val pinShadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(90, 0, 0, 0)
-            maskFilter = android.graphics.BlurMaskFilter(8f * density, android.graphics.BlurMaskFilter.Blur.NORMAL)
+            Paint.setMaskFilter = BlurMaskFilter(8f * density, BlurMaskFilter.Blur.NORMAL)
         }
         canvas.drawOval(
             RectF(
@@ -1689,7 +1700,7 @@ private fun createRouteStopMarkerBitmap(
         )
 
         val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = android.graphics.LinearGradient(
+            Paint.setShader = LinearGradient(
                 pinLeft,
                 pinTop,
                 pinLeft,
@@ -1699,7 +1710,7 @@ private fun createRouteStopMarkerBitmap(
                     android.graphics.Color.argb(0, 255, 255, 255)
                 ),
                 null,
-                android.graphics.Shader.TileMode.CLAMP
+                Shader.TileMode.CLAMP
             )
         }
 
@@ -1726,7 +1737,7 @@ private fun createMyLocationMarkerBitmap(ctx: Context): Bitmap {
 
     val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.argb(55, 0, 0, 0)
-        maskFilter = android.graphics.BlurMaskFilter(4f * density, android.graphics.BlurMaskFilter.Blur.NORMAL)
+        Paint.setMaskFilter = BlurMaskFilter(4f * density, BlurMaskFilter.Blur.NORMAL)
     }
     val outerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = android.graphics.Color.WHITE
@@ -1855,7 +1866,7 @@ private fun OsmdroidLiveMap(
     }
 
     val windowManager = remember {
-        ContextCompat.getSystemService(ctx, android.view.WindowManager::class.java)
+        ContextCompat.getSystemService(ctx, WindowManager::class.java)
     }
 
 
@@ -1875,11 +1886,11 @@ private fun OsmdroidLiveMap(
 
                     SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
 
-                    val displayRotation = windowManager?.defaultDisplay?.rotation ?: android.view.Surface.ROTATION_0
+                    val displayRotation = windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
                     val (axisX, axisY) = when (displayRotation) {
-                        android.view.Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
-                        android.view.Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
-                        android.view.Surface.ROTATION_270 -> SensorManager.AXIS_MINUS_Y to SensorManager.AXIS_X
+                        Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
+                        Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
+                        Surface.ROTATION_270 -> SensorManager.AXIS_MINUS_Y to SensorManager.AXIS_X
                         else -> SensorManager.AXIS_X to SensorManager.AXIS_Y
                     }
 
@@ -1910,18 +1921,18 @@ private fun OsmdroidLiveMap(
         }
     }
 
-    fun buildAnimatedLiveLocationMarkerBitmap(phase: Float): android.graphics.Bitmap {
+    fun buildAnimatedLiveLocationMarkerBitmap(phase: Float): Bitmap {
         val normalizedPhase = phase.coerceIn(0f, 1f)
         val sizePx = 96
         val centerX = sizePx / 2f
         val centerY = sizePx / 2f
 
-        val bitmap = android.graphics.Bitmap.createBitmap(
+        val bitmap = Bitmap.createBitmap(
             sizePx,
             sizePx,
-            android.graphics.Bitmap.Config.ARGB_8888
+            Bitmap.Config.ARGB_8888
         )
-        val canvas = android.graphics.Canvas(bitmap)
+        val canvas = Canvas(bitmap)
 
         val pulseRadius = 16f + (normalizedPhase * 16f)
         val pulseAlpha = ((1f - normalizedPhase) * 58f).toInt().coerceIn(0, 58)
@@ -1930,29 +1941,29 @@ private fun OsmdroidLiveMap(
         val innerGlowRadius = 15f
         val innerGlowAlpha = (18f + ((1f - normalizedPhase) * 16f)).toInt().coerceIn(0, 34)
 
-        val pulsePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        val pulsePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(pulseAlpha, 26, 115, 232)
-            style = android.graphics.Paint.Style.FILL
+            style = Paint.Style.FILL
         }
 
-        val innerGlowPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        val innerGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(innerGlowAlpha, 26, 115, 232)
-            style = android.graphics.Paint.Style.FILL
+            style = Paint.Style.FILL
         }
 
-        val whitePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        val whitePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(245, 255, 255, 255)
-            style = android.graphics.Paint.Style.FILL
+            style = Paint.Style.FILL
         }
 
-        val bluePaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        val bluePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.parseColor("#1A73E8")
-            style = android.graphics.Paint.Style.FILL
+            style = Paint.Style.FILL
         }
 
-        val highlightPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+        val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.argb(110, 255, 255, 255)
-            style = android.graphics.Paint.Style.FILL
+            style = Paint.Style.FILL
         }
 
         canvas.drawCircle(centerX, centerY, pulseRadius, pulsePaint)
@@ -1978,7 +1989,7 @@ private fun OsmdroidLiveMap(
         }
 
         marker.position = point
-        marker.icon = android.graphics.drawable.BitmapDrawable(
+        marker.icon = BitmapDrawable(
             ctx.resources,
             buildAnimatedLiveLocationMarkerBitmap(phase.coerceIn(0f, 1f))
         )
@@ -1998,7 +2009,7 @@ private fun OsmdroidLiveMap(
         }
 
         val zoom = map.zoomLevelDouble.toFloat()
-        val metersPerPixel = org.osmdroid.util.TileSystem.GroundResolution(
+        val metersPerPixel = TileSystem.GroundResolution(
             point.latitude,
             map.zoomLevelDouble
         ).toFloat().coerceAtLeast(0.01f)
@@ -2074,8 +2085,8 @@ private fun OsmdroidLiveMap(
             outlinePaint.color = android.graphics.Color.parseColor("#111827")
             outlinePaint.strokeWidth = 22f
             outlinePaint.isAntiAlias = true
-            outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-            outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
+            outlinePaint.strokeCap = Paint.Cap.ROUND
+            outlinePaint.strokeJoin = Paint.Join.ROUND
         }
         outer.setPoints(points)
         if (existingOuter == null) {
@@ -2087,8 +2098,8 @@ private fun OsmdroidLiveMap(
             outlinePaint.color = android.graphics.Color.parseColor("#2563EB")
             outlinePaint.strokeWidth = 12f
             outlinePaint.isAntiAlias = true
-            outlinePaint.strokeCap = android.graphics.Paint.Cap.ROUND
-            outlinePaint.strokeJoin = android.graphics.Paint.Join.ROUND
+            outlinePaint.strokeCap = Paint.Cap.ROUND
+            outlinePaint.strokeJoin = Paint.Join.ROUND
         }
         inner.setPoints(points)
         if (existingInner == null) {
@@ -2131,7 +2142,7 @@ private fun OsmdroidLiveMap(
                 existingMarker.position = point
                 if (existingMarker.title != label) {
                     existingMarker.title = label
-                    existingMarker.icon = android.graphics.drawable.BitmapDrawable(
+                    existingMarker.icon = BitmapDrawable(
                         ctx.resources,
                         getCachedRouteStopMarkerBitmap(ctx, label)
                     )
@@ -2147,7 +2158,7 @@ private fun OsmdroidLiveMap(
                     infoWindow = null
                     relatedObject = key
                     alpha = 0.98f
-                    icon = android.graphics.drawable.BitmapDrawable(
+                    icon = BitmapDrawable(
                         ctx.resources,
                         getCachedRouteStopMarkerBitmap(ctx, label)
                     )
@@ -2405,7 +2416,7 @@ private fun OsmdroidLiveMap(
                     override fun onZoom(event: ZoomEvent?): Boolean {
                         mapOrientationDeg = this@apply.mapOrientation
 
-                        val now = android.os.SystemClock.uptimeMillis()
+                        val now = SystemClock.uptimeMillis()
                         if ((now - lastGestureRefreshMs) < 48L) return false
                         lastGestureRefreshMs = now
 
@@ -2566,12 +2577,12 @@ private fun OsmdroidLiveMap(
             livePulseAnimator?.cancel()
 
             val animator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = 1800L
+                ValueAnimator.setDuration = 1800L
                 repeatCount = ValueAnimator.INFINITE
                 interpolator = LinearInterpolator()
                 addUpdateListener { valueAnimator ->
                     val phase = valueAnimator.animatedValue as Float
-                    val now = android.os.SystemClock.uptimeMillis()
+                    val now = SystemClock.uptimeMillis()
                     val phaseBucket = (phase * 18f).toInt()
                     val shouldRedraw =
                         (now - lastRadarAnimationFrameMs) >= 48L || phaseBucket != lastRadarPhaseBucket

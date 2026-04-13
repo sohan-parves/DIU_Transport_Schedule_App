@@ -1,23 +1,41 @@
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.ui.home
 
+import android.R
+import android.app.AlarmManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sohan.diutransportschedule.db.DbScheduleItem
 import com.sohan.diutransportschedule.db.JsonConverters
-import com.sohan.diutransportschedule.sync.ScheduleRepository
+import com.sohan.diutransportschedule.data.repository.ScheduleRepository
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.sohan.diutransportschedule.BuildConfig
+import com.sohan.diutransportschedule.ui.notice.checkAndSyncNoticesFromMeta
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 data class UiSchedule(
     val routeNo: String,
@@ -82,7 +100,7 @@ class HomeViewModel(
 
 
     private fun currentFirestoreWindowSlot(): Int {
-        val hour = java.time.LocalTime.now().hour
+        val hour = LocalTime.now().hour
         return when {
             hour in 5..11 -> 1   // Morning
             hour in 12..16 -> 2  // Noon
@@ -123,7 +141,7 @@ class HomeViewModel(
         selectedFridayRoute: String
     ): String {
         val todayIsFriday = try {
-            java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+            LocalDate.now().dayOfWeek == DayOfWeek.FRIDAY
         } catch (_: Throwable) {
             false
         }
@@ -161,7 +179,7 @@ class HomeViewModel(
         val slot = currentFirestoreWindowSlot()
         if (slot == 0) return false
 
-        val today = java.time.LocalDate.now().toString()
+        val today = LocalDate.now().toString()
         val (savedDate, savedSlot) = readAutoLastSlot(context)
         return !(savedDate == today && savedSlot == slot)
     }
@@ -175,7 +193,7 @@ class HomeViewModel(
 
         val prefs = firestoreWindowPrefs(context) ?: return
         prefs.edit()
-            .putString(KEY_FIRESTORE_WINDOW_DATE, java.time.LocalDate.now().toString())
+            .putString(KEY_FIRESTORE_WINDOW_DATE, LocalDate.now().toString())
             .putInt(KEY_FIRESTORE_WINDOW_SLOT, slot)
             .apply()
     }
@@ -313,7 +331,7 @@ class HomeViewModel(
             val qq = rawQuery.lowercase()
 
             val todayIsFriday = try {
-                java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+                LocalDate.now().dayOfWeek == DayOfWeek.FRIDAY
             } catch (_: Throwable) {
                 false
             }
@@ -631,14 +649,14 @@ class HomeViewModel(
     }
 
     fun updateRouteNotifications(
-        context: android.content.Context,
+        context: Context,
         selectedRoute: String,
         currentItems: List<UiSchedule>,
         enabled: Boolean,
         leadMinutes: Int
     ) {
         val todayIsFriday = try {
-            java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+            LocalDate.now().dayOfWeek == DayOfWeek.FRIDAY
         } catch (_: Throwable) {
             false
         }
@@ -696,15 +714,15 @@ private object RouteNotificationScheduler {
     private const val NOTIF_PREFS_NAME = "route_notification_ids"
     private const val KEY_NOTIF_IDS = "route_notification_ids"
 
-    fun ensureChannel(context: android.content.Context) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+    fun ensureChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm =
-                context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (nm.getNotificationChannel(CHANNEL_ID) == null) {
-                val ch = android.app.NotificationChannel(
+                val ch = NotificationChannel(
                     CHANNEL_ID,
                     "Route Notifications",
-                    android.app.NotificationManager.IMPORTANCE_HIGH
+                    NotificationManager.IMPORTANCE_HIGH
                 )
                 ch.description = "Alerts before selected route times"
                 nm.createNotificationChannel(ch)
@@ -712,9 +730,9 @@ private object RouteNotificationScheduler {
         }
     }
 
-    fun cancelAll(context: android.content.Context) {
-        val nm = androidx.core.app.NotificationManagerCompat.from(context)
-        val notifPrefs = context.getSharedPreferences(NOTIF_PREFS_NAME, android.content.Context.MODE_PRIVATE)
+    fun cancelAll(context: Context) {
+        val nm = NotificationManagerCompat.from(context)
+        val notifPrefs = context.getSharedPreferences(NOTIF_PREFS_NAME, Context.MODE_PRIVATE)
         val notifRaw = notifPrefs.getString(KEY_NOTIF_IDS, "").orEmpty()
 
         notifRaw.split(",")
@@ -729,25 +747,25 @@ private object RouteNotificationScheduler {
 
         notifPrefs.edit().remove(KEY_NOTIF_IDS).apply()
 
-        val am = context.getSystemService(android.content.Context.ALARM_SERVICE) as android.app.AlarmManager
-        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_SCHEDULED_CODES, "").orEmpty()
 
         raw.split(",")
             .mapNotNull { it.trim().toIntOrNull() }
             .distinct()
             .forEach { requestCode ->
-                val intent = android.content.Intent(context, RouteAlarmReceiver::class.java).apply {
-                    action = "ROUTE_ALARM"
+                val intent = Intent(context, RouteAlarmReceiver::class.java).apply {
+                    Intent.setAction = "ROUTE_ALARM"
                 }
 
-                val pi = android.app.PendingIntent.getBroadcast(
+                val pi = PendingIntent.getBroadcast(
                     context,
                     requestCode,
                     intent,
-                    android.app.PendingIntent.FLAG_UPDATE_CURRENT or
-                            (if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M)
-                                android.app.PendingIntent.FLAG_IMMUTABLE else 0)
+                    PendingIntent.FLAG_UPDATE_CURRENT or
+                            (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                                PendingIntent.FLAG_IMMUTABLE else 0)
                 )
 
                 try {
@@ -760,10 +778,10 @@ private object RouteNotificationScheduler {
         prefs.edit().remove(KEY_SCHEDULED_CODES).apply()
     }
     fun rememberNotificationId(
-        context: android.content.Context,
+        context: Context,
         notificationId: Int
     ) {
-        val prefs = context.getSharedPreferences(NOTIF_PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(NOTIF_PREFS_NAME, Context.MODE_PRIVATE)
         val existing = prefs.getString(KEY_NOTIF_IDS, "").orEmpty()
             .split(",")
             .mapNotNull { it.trim().toIntOrNull() }
@@ -777,10 +795,10 @@ private object RouteNotificationScheduler {
     }
 
     private fun rememberScheduledRequestCode(
-        context: android.content.Context,
+        context: Context,
         requestCode: Int
     ) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val existing = prefs.getString(KEY_SCHEDULED_CODES, "").orEmpty()
             .split(",")
             .mapNotNull { it.trim().toIntOrNull() }
@@ -794,7 +812,7 @@ private object RouteNotificationScheduler {
     }
 
     fun scheduleForRoute(
-        context: android.content.Context,
+        context: Context,
         routeNo: String,
         routeName: String,
         startTimes: List<String>,
@@ -809,13 +827,13 @@ private object RouteNotificationScheduler {
             departureTimes.forEach { add("Departure" to it) }
         }
 
-        val zone = java.time.ZoneId.systemDefault()
-        val now = java.time.ZonedDateTime.now(zone)
-        val am = context.getSystemService(android.content.Context.ALARM_SERVICE) as android.app.AlarmManager
+        val zone = ZoneId.systemDefault()
+        val now = ZonedDateTime.now(zone)
+        val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
-        val canExact = !(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S && !am.canScheduleExactAlarms())
+        val canExact = !(Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms())
         if (!canExact) {
-            android.util.Log.w("RouteNotificationScheduler", "Exact alarm not allowed; using inexact alarms")
+            Log.w("RouteNotificationScheduler", "Exact alarm not allowed; using inexact alarms")
         }
 
         all.forEach { (kind, raw) ->
@@ -828,7 +846,7 @@ private object RouteNotificationScheduler {
             if (appliesOn.equals("FRIDAY", ignoreCase = true)) {
                 // Move to next-or-today Friday at this time
                 val dow = now.dayOfWeek
-                val daysUntil = (java.time.DayOfWeek.FRIDAY.value - dow.value + 7) % 7
+                val daysUntil = (DayOfWeek.FRIDAY.value - dow.value + 7) % 7
                 whenZdt = now.plusDays(daysUntil.toLong()).with(time)
                 // If already passed (or too close), move to next week
                 if (whenZdt.isBefore(now.plusMinutes(1))) whenZdt = whenZdt.plusWeeks(1)
@@ -842,42 +860,42 @@ private object RouteNotificationScheduler {
             val minutesOfDay = time.hour * 60 + time.minute
             val requestCode = (routeNo.hashCode() * 31) + minutesOfDay + (kind.hashCode() * 17)
 
-            val intent = android.content.Intent(context, RouteAlarmReceiver::class.java).apply {
-                action = "ROUTE_ALARM"
+            val intent = Intent(context, RouteAlarmReceiver::class.java).apply {
+                Intent.setAction = "ROUTE_ALARM"
                 putExtra("routeNo", routeNo)
                 putExtra("kind", kind)
                 putExtra("timeText", formatTime(time))
                 putExtra("note", note)
             }
 
-            val pi = android.app.PendingIntent.getBroadcast(
+            val pi = PendingIntent.getBroadcast(
                 context,
                 requestCode,
                 intent,
-                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
             rememberScheduledRequestCode(context, requestCode)
 
             val triggerAtMillis = fireAt.toInstant().toEpochMilli()
             when {
-                canExact && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M -> {
-                    am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                canExact && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
                 }
                 canExact -> {
-                    am.setExact(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                    am.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
                 }
-                android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M -> {
-                    am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
+                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
                 }
                 else -> {
-                    am.set(android.app.AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+                    am.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
                 }
             }
         }
     }
 
-    private fun parseTime(raw: String): Pair<java.time.LocalTime, String>? {
+    private fun parseTime(raw: String): Pair<LocalTime, String>? {
         val r = raw.trim()
         if (r.isBlank()) return null
 
@@ -886,12 +904,12 @@ private object RouteNotificationScheduler {
         val timeStr = m.value.replace(" ", "").uppercase()
         val note = r.replace(m.value, "").trim().trimStart('-', '—').trim()
 
-        val fmt1 = java.time.format.DateTimeFormatter.ofPattern("h:mma")
-        val fmt2 = java.time.format.DateTimeFormatter.ofPattern("h:mm:ssa")
+        val fmt1 = DateTimeFormatter.ofPattern("h:mma")
+        val fmt2 = DateTimeFormatter.ofPattern("h:mm:ssa")
 
         val t = try {
-            if (timeStr.count { it == ':' } == 2) java.time.LocalTime.parse(timeStr, fmt2)
-            else java.time.LocalTime.parse(timeStr, fmt1)
+            if (timeStr.count { it == ':' } == 2) LocalTime.parse(timeStr, fmt2)
+            else LocalTime.parse(timeStr, fmt1)
         } catch (_: Throwable) {
             return null
         }
@@ -899,12 +917,12 @@ private object RouteNotificationScheduler {
         return t to note
     }
 
-    private fun formatTime(t: java.time.LocalTime): String =
-        t.format(java.time.format.DateTimeFormatter.ofPattern("h:mm a"))
+    private fun formatTime(t: LocalTime): String =
+        t.format(DateTimeFormatter.ofPattern("h:mm a"))
 }
 
-class RouteAlarmReceiver : android.content.BroadcastReceiver() {
-    override fun onReceive(context: android.content.Context, intent: android.content.Intent) {
+class RouteAlarmReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
         val routeNo = intent.getStringExtra("routeNo").orEmpty()
         val kind = intent.getStringExtra("kind").orEmpty()
         val timeText = intent.getStringExtra("timeText").orEmpty()
@@ -932,25 +950,25 @@ class RouteAlarmReceiver : android.content.BroadcastReceiver() {
         }
 
         val notificationId = (routeNo + kind + timeText).hashCode()
-        val notif = androidx.core.app.NotificationCompat.Builder(context, "route_notifications")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+        val notif = NotificationCompat.Builder(context, "route_notifications")
+            .setSmallIcon(R.drawable.ic_dialog_info)
             // TIME is the primary headline
             .setContentTitle(title)
             // Secondary info in the collapsed view
             .setContentText(line1)
             // Expanded view keeps TIME as big title + shows details
             .setStyle(
-                androidx.core.app.NotificationCompat.BigTextStyle()
+                NotificationCompat.BigTextStyle()
                     .setBigContentTitle(title)
                     .setSummaryText("DIU Transport")
                     .bigText(bigText)
             )
-            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
-            .setCategory(androidx.core.app.NotificationCompat.CATEGORY_REMINDER)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(false)
             .build()
 
-        androidx.core.app.NotificationManagerCompat.from(context)
+        NotificationManagerCompat.from(context)
             .notify(notificationId, notif)
 
         try {

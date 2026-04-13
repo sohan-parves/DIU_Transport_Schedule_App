@@ -14,24 +14,28 @@ val PrimaryBlueDark = DeepBlueDark
 
 // ===== App surfaces =====
 val AppBackgroundLight = Color(0xFFF6F8FF)
-// Dark background should be noticeably darker than card surface
 val AppBackgroundDark = Color(0xFF070B17)
 
-val CardSurfaceLight = Color(0xFFFFFFFF)
-// Dark card surface slightly lighter for clear separation
+// white না, soft premium surface
+val CardSurfaceLight = Color(0xFFF8FAFC)
 val CardSurfaceDark = Color(0xFF1A2440)
 
 // ===== Text tokens =====
-// High-contrast text tokens for readability (use AccentGreen only as accent, not primary text)
 val TextPrimaryLight = Color(0xFF0F172A)
 val TextPrimaryDark = Color(0xFFE6EAF2)
 
 val TextSecondaryLight = Color(0xFF475569)
 val TextSecondaryDark = Color(0xFFB8C2D6)
 
-val SoftBlue = Color(0xFFE8F0FF)
-
+val SoftBlue = Color(0xFFEFF4FF)
 val SurfaceVariantDark = Color(0xFF223055)
+
+// ===== Component tokens =====
+val TimeChipLight = Color(0xFFF3F6FF)
+val TimeChipBorderLight = Color(0xFFD6E4FF)
+val SkeletonCardLight = Color(0xFFF8FAFC)
+val OverlayScrimLight = Color(0x33000000)
+val OverlayScrimDark = Color(0x8C000000)
 
 val SuccessBg = Color(0xFFEAF7EF)
 val SuccessText = AccentGreen

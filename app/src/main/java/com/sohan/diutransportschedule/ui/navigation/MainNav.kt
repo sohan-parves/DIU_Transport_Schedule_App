@@ -1,26 +1,22 @@
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.ui.navigation
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.TileMode
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.zIndex
+import com.sohan.diutransportschedule.ui.components.BottomTab
+import com.sohan.diutransportschedule.ui.home.HomeScreen
+import com.sohan.diutransportschedule.ui.home.HomeViewModel
+import com.sohan.diutransportschedule.ui.map.LiveMapScreen
+import com.sohan.diutransportschedule.ui.notice.NoticeScreen
+import com.sohan.diutransportschedule.ui.components.PremiumBottomBar
+import com.sohan.diutransportschedule.ui.settings.ProfileScreen
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

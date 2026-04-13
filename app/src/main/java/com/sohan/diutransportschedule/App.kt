@@ -8,7 +8,7 @@ import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.firestore.FirebaseFirestore
 import com.sohan.diutransportschedule.db.AppDatabase
 import com.sohan.diutransportschedule.prefs.UserPrefs
-import com.sohan.diutransportschedule.sync.ScheduleRepository
+import com.sohan.diutransportschedule.data.repository.ScheduleRepository
 import com.sohan.diutransportschedule.sync.VersionStore
 
 class App : Application() {

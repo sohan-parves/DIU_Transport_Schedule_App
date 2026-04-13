@@ -1,4 +1,6 @@
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.ui.notice
+
+import com.sohan.diutransportschedule.ui.theme.*
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -38,7 +40,6 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
-import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import kotlinx.coroutines.delay
@@ -47,7 +48,10 @@ import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-import com.sohan.diutransportschedule.sync.ACTION_NEW_NOTICE
+import androidx.compose.material.ExperimentalMaterialApi
+import androidx.compose.material.pullrefresh.PullRefreshIndicator
+import androidx.compose.ui.geometry.Offset
+import com.sohan.diutransportschedule.notifications.ACTION_NEW_NOTICE
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -342,7 +346,7 @@ private fun saveReadIds(ctx: Context, ids: Set<String>) {
 }
 
 
-@OptIn(androidx.compose.material.ExperimentalMaterialApi::class)
+@OptIn(ExperimentalMaterialApi::class)
 @Composable
 fun NoticeScreen(pad: PaddingValues) {
     val ctx = LocalContext.current
@@ -426,20 +430,23 @@ fun NoticeScreen(pad: PaddingValues) {
         containerColor = if (dark)
             MaterialTheme.colorScheme.surfaceContainerHigh
         else
-            MaterialTheme.colorScheme.surfaceContainerHigh
+            CardSurfaceLight
     )
 
     val readCardColors = CardDefaults.cardColors(
         containerColor = if (dark)
             MaterialTheme.colorScheme.surface
         else
-            MaterialTheme.colorScheme.surfaceContainer
+            TimeChipLight
     )
 
-    // Smaller, softer border (user asked to reduce border)
+    // Notice card border: more visible in light mode, premium look
     val noticeCardBorder = BorderStroke(
-        width = 0.35.dp,
-        color = MaterialTheme.colorScheme.outline.copy(alpha = if (dark) 0.14f else 0.10f)
+        width = if (dark) 0.35.dp else 0.6.dp,
+        color = if (dark)
+            MaterialTheme.colorScheme.outline.copy(alpha = 0.14f)
+        else
+            TimeChipBorderLight.copy(alpha = 0.9f)
     )
 
     // No green: unread is brighter white-ish; read is the same but with lower opacity.
@@ -529,8 +536,8 @@ fun NoticeScreen(pad: PaddingValues) {
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        if (dark) Color(0xFF07111F) else Color(0xFFF8FBFF),
-                        if (dark) Color(0xFF040B16) else Color(0xFFFDFEFF)
+                        if (dark) Color(0xFF07111F) else AppBackgroundLight,
+                        if (dark) Color(0xFF040B16) else SoftBlue
                     )
                 )
             )
@@ -540,55 +547,55 @@ fun NoticeScreen(pad: PaddingValues) {
         Canvas(
             modifier = Modifier.matchParentSize()
         ) {
-            val bubblePrimary = if (dark) Color(0xFF60A5FA).copy(alpha = 0.07f) else Color(0xFF60A5FA).copy(alpha = 0.10f)
-            val bubbleSoft = if (dark) Color.White.copy(alpha = 0.020f) else Color.White.copy(alpha = 0.78f)
-            val bubbleAccent = if (dark) Color(0xFF93C5FD).copy(alpha = 0.040f) else Color(0xFFBFDBFE).copy(alpha = 0.36f)
-            val bubbleDeep = if (dark) Color(0xFF1D4ED8).copy(alpha = 0.055f) else Color(0xFFDBEAFE).copy(alpha = 0.30f)
+            val bubblePrimary = if (dark) Color(0xFF60A5FA).copy(alpha = 0.07f) else DeepBlue.copy(alpha = 0.08f)
+            val bubbleSoft = if (dark) Color.White.copy(alpha = 0.020f) else CardSurfaceLight.copy(alpha = 0.82f)
+            val bubbleAccent = if (dark) Color(0xFF93C5FD).copy(alpha = 0.040f) else TimeChipBorderLight.copy(alpha = 0.34f)
+            val bubbleDeep = if (dark) Color(0xFF1D4ED8).copy(alpha = 0.055f) else SoftBlue.copy(alpha = 0.65f)
 
             drawCircle(
                 color = bubblePrimary,
                 radius = size.minDimension * 0.28f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.08f, size.height * 0.06f)
+                center = Offset(size.width * 0.08f, size.height * 0.06f)
             )
             drawCircle(
                 color = bubbleDeep,
                 radius = size.minDimension * 0.24f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.88f, size.height * 0.10f)
+                center = Offset(size.width * 0.88f, size.height * 0.10f)
             )
             drawCircle(
                 color = bubbleSoft,
                 radius = size.minDimension * 0.12f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.16f, size.height * 0.34f)
+                center = Offset(size.width * 0.16f, size.height * 0.34f)
             )
             drawCircle(
                 color = bubbleAccent,
                 radius = size.minDimension * 0.15f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.90f, size.height * 0.28f)
+                center = Offset(size.width * 0.90f, size.height * 0.28f)
             )
             drawCircle(
                 color = bubblePrimary,
                 radius = size.minDimension * 0.11f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.78f, size.height * 0.56f)
+                center = Offset(size.width * 0.78f, size.height * 0.56f)
             )
             drawCircle(
                 color = bubbleSoft,
                 radius = size.minDimension * 0.14f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.20f, size.height * 0.66f)
+                center = Offset(size.width * 0.20f, size.height * 0.66f)
             )
             drawCircle(
                 color = bubbleDeep,
                 radius = size.minDimension * 0.18f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.92f, size.height * 0.78f)
+                center = Offset(size.width * 0.92f, size.height * 0.78f)
             )
             drawCircle(
                 color = bubbleAccent,
                 radius = size.minDimension * 0.09f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.08f, size.height * 0.86f)
+                center = Offset(size.width * 0.08f, size.height * 0.86f)
             )
             drawCircle(
                 color = bubbleSoft,
                 radius = size.minDimension * 0.07f,
-                center = androidx.compose.ui.geometry.Offset(size.width * 0.62f, size.height * 0.80f)
+                center = Offset(size.width * 0.62f, size.height * 0.80f)
             )
 
             val lineColor = if (dark) Color.White.copy(alpha = 0.028f) else Color(0xFFBFDBFE).copy(alpha = 0.20f)
@@ -597,8 +604,8 @@ fun NoticeScreen(pad: PaddingValues) {
                 val y = size.height * 0.46f + i * step * 0.55f
                 drawLine(
                     color = lineColor,
-                    start = androidx.compose.ui.geometry.Offset(size.width * 0.08f, y),
-                    end = androidx.compose.ui.geometry.Offset(size.width * 0.92f, y),
+                    start = Offset(size.width * 0.08f, y),
+                    end = Offset(size.width * 0.92f, y),
                     strokeWidth = 1.2f
                 )
             }
@@ -612,7 +619,7 @@ fun NoticeScreen(pad: PaddingValues) {
                     drawCircle(
                         color = dotColor,
                         radius = 1.8f,
-                        center = androidx.compose.ui.geometry.Offset(x, y)
+                        center = Offset(x, y)
                     )
                 }
             }
@@ -790,60 +797,60 @@ fun NoticeScreen(pad: PaddingValues) {
                             ) {
                                 Surface(
                                     modifier = Modifier.fillMaxSize(),
-                                    color = if (dark) Color(0xFF0B0F17) else Color(0xFFF8FBFF)
+                                    color = if (dark) Color(0xFF0B0F17) else AppBackgroundLight
                                 ) {
                                     Box(modifier = Modifier.fillMaxSize()) {
                                         Canvas(
                                             modifier = Modifier.matchParentSize()
                                         ) {
-                                            val bubbleColorPrimary = if (dark) Color(0xFF60A5FA).copy(alpha = 0.09f) else Color(0xFF60A5FA).copy(alpha = 0.11f)
-                                            val bubbleColorSecondary = if (dark) Color.White.copy(alpha = 0.035f) else Color.White.copy(alpha = 0.80f)
-                                            val bubbleColorAccent = if (dark) Color(0xFF93C5FD).copy(alpha = 0.05f) else Color(0xFFBFDBFE).copy(alpha = 0.36f)
+                                            val bubbleColorPrimary = if (dark) Color(0xFF60A5FA).copy(alpha = 0.09f) else DeepBlue.copy(alpha = 0.09f)
+                                            val bubbleColorSecondary = if (dark) Color.White.copy(alpha = 0.035f) else CardSurfaceLight.copy(alpha = 0.84f)
+                                            val bubbleColorAccent = if (dark) Color(0xFF93C5FD).copy(alpha = 0.05f) else TimeChipBorderLight.copy(alpha = 0.34f)
 
                                             drawCircle(
                                                 color = bubbleColorPrimary,
                                                 radius = size.minDimension * 0.34f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.88f, size.height * 0.10f)
+                                                center = Offset(size.width * 0.88f, size.height * 0.10f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorSecondary,
                                                 radius = size.minDimension * 0.22f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.14f, size.height * 0.05f)
+                                                center = Offset(size.width * 0.14f, size.height * 0.05f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorAccent,
                                                 radius = size.minDimension * 0.18f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.90f, size.height * 0.34f)
+                                                center = Offset(size.width * 0.90f, size.height * 0.34f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorPrimary,
                                                 radius = size.minDimension * 0.12f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.10f, size.height * 0.34f)
+                                                center = Offset(size.width * 0.10f, size.height * 0.34f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorSecondary,
                                                 radius = size.minDimension * 0.16f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.84f, size.height * 0.62f)
+                                                center = Offset(size.width * 0.84f, size.height * 0.62f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorAccent,
                                                 radius = size.minDimension * 0.10f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.18f, size.height * 0.76f)
+                                                center = Offset(size.width * 0.18f, size.height * 0.76f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorPrimary,
                                                 radius = size.minDimension * 0.20f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.92f, size.height * 0.88f)
+                                                center = Offset(size.width * 0.92f, size.height * 0.88f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorSecondary,
                                                 radius = size.minDimension * 0.08f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.72f, size.height * 0.78f)
+                                                center = Offset(size.width * 0.72f, size.height * 0.78f)
                                             )
                                             drawCircle(
                                                 color = bubbleColorAccent,
                                                 radius = size.minDimension * 0.14f,
-                                                center = androidx.compose.ui.geometry.Offset(size.width * 0.08f, size.height * 0.92f)
+                                                center = Offset(size.width * 0.08f, size.height * 0.92f)
                                             )
                                         }
 
@@ -854,8 +861,8 @@ fun NoticeScreen(pad: PaddingValues) {
                                                 .background(
                                                     Brush.verticalGradient(
                                                         colors = listOf(
-                                                            if (dark) Color(0xFF182033) else Color(0xFFF9FBFF),
-                                                            if (dark) Color(0xFF0F1523) else Color(0xFFFFFFFF)
+                                                            if (dark) Color(0xFF182033) else SoftBlue,
+                                                            if (dark) Color(0xFF0F1523) else CardSurfaceLight
                                                         )
                                                     )
                                                 )
@@ -1017,8 +1024,8 @@ fun NoticeScreen(pad: PaddingValues) {
                 }
             }
         }
-        
-        androidx.compose.material.pullrefresh.PullRefreshIndicator(
+
+        PullRefreshIndicator(
             refreshing = isRefreshing,
             state = pullRefreshState,
             modifier = Modifier.align(Alignment.TopCenter),

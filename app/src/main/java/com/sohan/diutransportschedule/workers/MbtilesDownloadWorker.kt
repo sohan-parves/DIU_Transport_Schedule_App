@@ -1,5 +1,6 @@
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.workers
 
+import android.R
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
@@ -38,7 +39,10 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
             val remoteMeta = fetchRemoteMeta(url)
             val localMeta = readLocalMeta(metaFile)
 
-            if (!force && dst.exists() && remoteMeta != null && localMeta != null && localMeta.matches(remoteMeta)) {
+            if (!force && dst.exists() && remoteMeta != null && localMeta != null && localMeta.matches(
+                    remoteMeta
+                )
+            ) {
                 setProgress(
                     workDataOf(
                         "progress" to 100,
@@ -73,7 +77,8 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
             }
 
             val code = connection.responseCode
-            val totalRemoteBytes = remoteMeta?.contentLength ?: if (connection.contentLengthLong > 0) connection.contentLengthLong else -1L
+            val totalRemoteBytes = remoteMeta?.contentLength
+                ?: if (connection.contentLengthLong > 0) connection.contentLengthLong else -1L
 
             val shouldAppend = existingBytes > 0L && code == HttpURLConnection.HTTP_PARTIAL
             if (code !in 200..299 && code != HttpURLConnection.HTTP_PARTIAL) {
@@ -92,7 +97,8 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
             runCatching {
                 setForeground(
                     createFg(
-                        if (totalRemoteBytes > 0L) ((done * 100) / totalRemoteBytes).toInt().coerceIn(0, 100) else -1,
+                        if (totalRemoteBytes > 0L) ((done * 100) / totalRemoteBytes).toInt()
+                            .coerceIn(0, 100) else -1,
                         if (shouldAppend) "Resuming offline map download…" else "Downloading offline map…"
                     )
                 )
@@ -120,7 +126,14 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
                                         "version_label" to (remoteMeta?.versionLabel() ?: "")
                                     )
                                 )
-                                runCatching { setForeground(createFg(p, if (shouldAppend) "Resuming offline map download…" else "Downloading offline map…")) }
+                                runCatching {
+                                    setForeground(
+                                        createFg(
+                                            p,
+                                            if (shouldAppend) "Resuming offline map download…" else "Downloading offline map…"
+                                        )
+                                    )
+                                }
                             } else {
                                 setProgress(
                                     workDataOf(
@@ -130,7 +143,14 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
                                         "version_label" to (remoteMeta?.versionLabel() ?: "")
                                     )
                                 )
-                                runCatching { setForeground(createFg(-1, if (shouldAppend) "Resuming offline map download…" else "Downloading offline map…")) }
+                                runCatching {
+                                    setForeground(
+                                        createFg(
+                                            -1,
+                                            if (shouldAppend) "Resuming offline map download…" else "Downloading offline map…"
+                                        )
+                                    )
+                                }
                             }
                         }
                     }
@@ -236,7 +256,7 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
         val safeProgress = progress.coerceIn(0, 100)
 
         val notification = NotificationCompat.Builder(applicationContext, channelId)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.stat_sys_download)
             .setContentTitle("Offline map sync")
             .setContentText(if (indeterminate) statusText else "$statusText ($safeProgress%)")
             .setOngoing(true)
@@ -260,7 +280,11 @@ class MbtilesDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineW
             val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (nm.getNotificationChannel(channelId) == null) {
                 nm.createNotificationChannel(
-                    NotificationChannel(channelId, "Offline Downloads", NotificationManager.IMPORTANCE_LOW)
+                    NotificationChannel(
+                        channelId,
+                        "Offline Downloads",
+                        NotificationManager.IMPORTANCE_LOW
+                    )
                 )
             }
         }

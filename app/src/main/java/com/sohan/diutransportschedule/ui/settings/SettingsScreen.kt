@@ -1,12 +1,9 @@
-
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.ui.settings
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.Snackbar
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.rememberScrollState
@@ -72,7 +69,6 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.ui.platform.LocalContext
 import android.content.Context
 import android.content.pm.PackageManager
-import android.widget.Toast
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import androidx.compose.runtime.LaunchedEffect
@@ -110,25 +106,37 @@ import androidx.compose.material.icons.filled.GraphicEq
 import java.io.File
 import java.io.FileOutputStream
 import androidx.core.app.NotificationManagerCompat
-import android.app.AlarmManager
-import android.app.PendingIntent
-import com.sohan.diutransportschedule.MainActivity
-import com.sohan.diutransportschedule.ScheduleAlarmReceiver
 import com.sohan.diutransportschedule.R
 import androidx.compose.material3.ColorScheme
 import kotlin.math.ln
-import androidx.compose.material3.MenuAnchorType
 import android.Manifest
+import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.key
 import androidx.compose.material.icons.outlined.Info
 import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
 import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.BatteryChargingFull
+import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.SettingsApplications
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
+import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.notifications.resetAlarmStateForNotifyTimeChange
+import com.sohan.diutransportschedule.ui.map.SelectedRoadStore
+import com.sohan.diutransportschedule.ui.home.HomeViewModel
+import com.sohan.diutransportschedule.ui.home.RouteOption
+import com.sohan.diutransportschedule.ui.theme.*
+import java.time.DayOfWeek
+import java.time.LocalDate
 
 private fun ColorScheme.surfaceColorAtElevationCompat(elevation: Dp): Color {
     if (elevation == 0.dp) return surface
@@ -145,7 +153,7 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val dark by vm.darkMode.collectAsState()
     val selectedRoute by vm.selectedRoute.collectAsState()
-    val isFriday = java.time.LocalDate.now().dayOfWeek == java.time.DayOfWeek.FRIDAY
+    val isFriday = LocalDate.now().dayOfWeek == DayOfWeek.FRIDAY
     var selectedFridayRouteNoUi by rememberSaveable {
         mutableStateOf(routePrefs.getString("selected_friday_route", "").orEmpty())
     }
@@ -217,13 +225,12 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val selectedRouteLabel by vm.selectedRouteLabel.collectAsState()
     val isSyncing by vm.isSyncing.collectAsState()
-    val primaryText = if (dark) Color.White else MaterialTheme.colorScheme.onSurface
+    val primaryText = if (dark) CardSurfaceLight else MaterialTheme.colorScheme.onSurface
     val secondaryText =
-        if (dark) Color.White.copy(alpha = 0.88f) else MaterialTheme.colorScheme.onSurfaceVariant
+        if (dark) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant
     val view = LocalView.current
     val notificationsEnabled by vm.notificationsEnabled.collectAsState()
-    val effectiveNotificationsEnabled =
-        notificationsEnabled && routeAllowsMasterNotificationsToday
+    val effectiveNotificationsEnabled = notificationsEnabled && routeAllowsMasterNotificationsToday
     val notifyLeadMinutes by vm.notifyLeadMinutes.collectAsState()
     val navBarBottomPad = with(LocalDensity.current) {
         val bottomPx = runCatching {
@@ -245,7 +252,7 @@ fun ProfileScreen(vm: HomeViewModel) {
 
     val alertPrefs =
         remember(ctx) { ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE) }
-    val hostActivity = ctx as? com.sohan.diutransportschedule.MainActivity
+    val hostActivity = ctx as? MainActivity
 
     var alarmSound5mEnabled by rememberSaveable {
         mutableStateOf(alertPrefs.getBoolean("alarm_sound_5m", false))
@@ -356,6 +363,8 @@ fun ProfileScreen(vm: HomeViewModel) {
                 customRingtoneUri != appDefaultRingtoneUri &&
                 customRingtoneName != appDefaultRingtoneName
     var showRingtonePickerPage by rememberSaveable { mutableStateOf(false) }
+    var showNotificationSettingsPage by rememberSaveable { mutableStateOf(false) }
+    var showNotificationOptimizationPage by rememberSaveable { mutableStateOf(false) }
 
     val playPreviewVibration: (String) -> Unit = remember(ctx) {
         { patternName ->
@@ -618,12 +627,12 @@ fun ProfileScreen(vm: HomeViewModel) {
             val pickedName = runCatching {
                 ctx.contentResolver.query(
                     uri,
-                    arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                    arrayOf(OpenableColumns.DISPLAY_NAME),
                     null,
                     null,
                     null
                 )?.use { c ->
-                    val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
                 }
             }.getOrNull()?.ifBlank { null } ?: "Custom ringtone"
@@ -716,8 +725,8 @@ fun ProfileScreen(vm: HomeViewModel) {
     var previewingVibrationPattern by rememberSaveable { mutableStateOf("") }
 
     // Premium card styling (light mode)
-    val premiumLightCard = MaterialTheme.colorScheme.surfaceColorAtElevationCompat(2.dp)
-    val premiumLightBorder = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.22f)
+    val premiumLightCard = CardSurfaceLight
+    val premiumLightBorder = TimeChipBorderLight
     val premiumLightDivider = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
 
     val greenSwitchColors = SwitchDefaults.colors(
@@ -778,7 +787,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                         shape = RoundedCornerShape(22.dp),
                         tonalElevation = 6.dp,
                         shadowElevation = 12.dp,
-                        color = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard
+                        color = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
                     ) {
                         Column(
                             modifier = Modifier.padding(horizontal = 24.dp, vertical = 22.dp),
@@ -853,7 +862,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                     elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
                     border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard
+                        containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
                     )
                 ) {
                     Column(
@@ -1421,7 +1430,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                     elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
                     border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard
+                        containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
                     )
                 ) {
                     Row(
@@ -1462,7 +1471,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                     elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
                     border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard
+                        containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
                     )
                 ) {
                     Column(
@@ -1503,8 +1512,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                             )
                         }
 
-
-
                         HorizontalDivider(
                             color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
                                 alpha = 0.10f
@@ -1512,7 +1519,11 @@ fun ProfileScreen(vm: HomeViewModel) {
                         )
 
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable { showNotificationSettingsPage = true }
+                                .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
@@ -1522,189 +1533,90 @@ fun ProfileScreen(vm: HomeViewModel) {
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = primaryText
                                 )
+
                                 Text(
-                                    text = when {
-                                        notificationsBlockedByRoute -> {
-                                            if (isFriday) {
-                                                "Friday: pick a Friday route (not ALL). Daily route does not apply today."
-                                            } else {
-                                                "Non‑Friday: pick a daily route (not ALL, not a Friday route). Friday route does not apply today."
-                                            }
-                                        }
-                                        else -> "Turn this ON to enable notifications and vibration together. Ringtone is controlled separately below"
-                                    },
+                                    text = "Tap to open all notification settings",
                                     style = MaterialTheme.typography.bodyMedium,
-                                    color = primaryText
+                                    color = secondaryText
                                 )
                             }
-                            Switch(
-                                checked = effectiveNotificationsEnabled,
-                                onCheckedChange = { enabled ->
-                                    if (!enabled) {
-                                        vm.setNotificationsEnabled(false)
-                                        alarmSound5mEnabled = false
-                                        alarmVibrate5mEnabled = false
-                                        alertPrefs.edit()
-                                            .putBoolean("master_notifications_enabled", false)
-                                            .putBoolean("alarm_sound_5m", false)
-                                            .putBoolean("alarm_vibrate_5m", false)
-                                            .apply()
-                                        showToggleMessage("Notifications turned off")
-                                    } else {
-                                        if (notificationsBlockedByRoute) {
-                                            vm.setNotificationsEnabled(false)
-                                            alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
-                                            showToggleMessage(
-                                                if (isFriday) {
-                                                    "Select a Friday route (not ALL) to enable notifications"
-                                                } else {
-                                                    "Select a daily route (not ALL) to enable notifications"
-                                                }
-                                            )
-                                        } else if (hasNotificationPermissionNow()) {
-                                            vm.setNotificationsEnabled(true)
 
-                                            val savedAlarmSoundEnabled = alertPrefs.getBoolean("alarm_sound_5m", false)
-
-                                            alarmVibrate5mEnabled = true
-                                            // Do NOT auto enable ringtone when master ON
-                                            alarmSound5mEnabled = alertPrefs.getBoolean("alarm_sound_5m", false)
-
-                                            alertPrefs.edit()
-                                                .putBoolean("master_notifications_enabled", true)
-                                                .putBoolean("alarm_vibrate_5m", true)
-                                                .putBoolean("alarm_sound_5m", alarmSound5mEnabled)
-                                                .apply()
-                                            showToggleMessage("Notifications enabled")
-                                        } else {
-                                            vm.setNotificationsEnabled(false)
-                                            alertPrefs.edit().putBoolean("master_notifications_enabled", false).apply()
-
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                                hostActivity?.showPermissionIntroThenRequest(
-                                                    permission = Manifest.permission.POST_NOTIFICATIONS,
-                                                    requestAction = {
-                                                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                                    }
-                                                )
-                                            } else {
-                                                try {
-                                                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                                        putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
-                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                    }
-                                                    ctx.startActivity(intent)
-                                                } catch (_: Throwable) {
-                                                    val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                                        data = Uri.fromParts("package", ctx.packageName, null)
-                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                    }
-                                                    ctx.startActivity(fallback)
-                                                }
-                                                showToggleMessage("Enable app notifications from Settings")
-                                            }
-                                        }
-                                    }
-                                },
-                                enabled = true,
-                                colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
-                            )
-                        }
-
-                        if (notificationsBlockedByRoute) {
                             Text(
-                                text = if (isFriday)
-                                    "Today is Friday — only the Friday route dropdown controls whether notifications can be on."
-                                else
-                                    "Any day except Friday — only the daily route dropdown controls whether notifications can be on.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = secondaryText
+                                text = "Open",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+
+        if (showNotificationSettingsPage) {
+            Dialog(
+                onDismissRequest = { showNotificationSettingsPage = false },
+                properties = DialogProperties(
+                    usePlatformDefaultWidth = false,
+                    dismissOnBackPress = true,
+                    dismissOnClickOutside = false
+                )
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(start = 16.dp, end = 16.dp, top = 16.dp)
+                            .padding(bottom = 24.dp + navBarBottomPad),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Spacer(Modifier.height(20.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "Notification Settings",
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = primaryText
+                            )
+
+                            Text(
+                                text = "Back",
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { showNotificationSettingsPage = false }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
 
-                        // --- Notification lead time state ---
-                        var notifyLeadMinutesDraft by remember(notifyLeadMinutes) {
-                            mutableStateOf(notifyLeadMinutes.toFloat())
-                        }
-                        var notifyLeadMinutesDragging by remember { mutableStateOf(false) }
-                        LaunchedEffect(notifyLeadMinutes) {
-                            if (!notifyLeadMinutesDragging) {
-                                notifyLeadMinutesDraft = notifyLeadMinutes.toFloat()
-                            }
-                        }
-
-                        AnimatedVisibility(visible = effectiveNotificationsEnabled) {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    text = "Notify me ${notifyLeadMinutesDraft.toInt().coerceIn(5, 120)} minutes before",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = primaryText
-                                )
-
-                                Slider(
-                                    value = notifyLeadMinutesDraft,
-                                    onValueChange = {
-                                        notifyLeadMinutesDragging = true
-                                        notifyLeadMinutesDraft = it
-                                    },
-                                    onValueChangeFinished = {
-                                        notifyLeadMinutesDragging = false
-                                        val finalLeadMinutes =
-                                            notifyLeadMinutesDraft.toInt().coerceIn(5, 120)
-                                        com.sohan.diutransportschedule.resetAlarmStateForNotifyTimeChange(
-                                            ctx
-                                        )
-                                        vm.setNotifyLeadMinutes(finalLeadMinutes)
-                                        notifyLeadMinutesDraft = finalLeadMinutes.toFloat()
-                                        val now = System.currentTimeMillis()
-                                        val lastShown = ctx.getSharedPreferences(
-                                            "notify_toast_guard",
-                                            Context.MODE_PRIVATE
-                                        )
-                                            .getLong("last_notify_toast", 0L)
-
-                                        if (now - lastShown > 3000) {
-                                            ctx.getSharedPreferences(
-                                                "notify_toast_guard",
-                                                Context.MODE_PRIVATE
-                                            )
-                                                .edit()
-                                                .putLong("last_notify_toast", now)
-                                                .apply()
-
-                                            scope.launch {
-                                                delay(400)
-                                                showToggleMessage("Notify time updated. Alarm, notification and vibration reset.")
-                                            }
-                                        }
-                                    },
-                                    valueRange = 5f..120f,
-                                    steps = 22,
-                                    colors = if (dark) SliderDefaults.colors(
-                                        thumbColor = MaterialTheme.colorScheme.secondary,
-                                        activeTrackColor = MaterialTheme.colorScheme.secondary,
-                                        inactiveTrackColor = MaterialTheme.colorScheme.secondary.copy(
-                                            alpha = 0.30f
-                                        )
-                                    ) else SliderDefaults.colors()
-                                )
-
-                                Text(
-                                    text = "Default: 30 minutes",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = primaryText
-                                )
-                            }
-                            HorizontalDivider(
-                                color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(22.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                            border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
                             )
-                        }
-                        AnimatedVisibility(visible = effectiveNotificationsEnabled) {
-                            Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                                HorizontalDivider(
-                                    color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
-                                        alpha = 0.10f
-                                    ) else premiumLightDivider
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
+                            ) {
+                                Text(
+                                    text = "Notifications",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = primaryText
                                 )
 
                                 Row(
@@ -1714,401 +1626,722 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = "Ringtone",
+                                            text = "Master Notification",
                                             style = MaterialTheme.typography.bodyLarge,
                                             color = primaryText
                                         )
                                         Text(
-                                            text = "Play alarm ringtone when a notice arrives",
+                                            text = when {
+                                                notificationsBlockedByRoute -> {
+                                                    if (isFriday) {
+                                                        "Friday: pick a Friday route (not ALL). Daily route does not apply today."
+                                                    } else {
+                                                        "Non-Friday: pick a daily route (not ALL, not a Friday route). Friday route does not apply today."
+                                                    }
+                                                }
+
+                                                else -> "Turn this ON to enable notifications and vibration together. Ringtone is controlled separately below"
+                                            },
                                             style = MaterialTheme.typography.bodyMedium,
-                                            color = secondaryText
+                                            color = primaryText
                                         )
                                     }
+
                                     Switch(
-                                        checked = alarmSound5mEnabled,
-                                        onCheckedChange = {
-                                            alarmSound5mEnabled = it
-                                            alertPrefs.edit().putBoolean("alarm_sound_5m", it)
-                                                .apply()
-                                            showToggleMessage(if (it) "Ringtone ON" else "Ringtone OFF")
+                                        checked = effectiveNotificationsEnabled,
+                                        onCheckedChange = { enabled ->
+                                            if (!enabled) {
+                                                vm.setNotificationsEnabled(false)
+                                                alarmSound5mEnabled = false
+                                                alarmVibrate5mEnabled = false
+                                                alertPrefs.edit()
+                                                    .putBoolean(
+                                                        "master_notifications_enabled",
+                                                        false
+                                                    )
+                                                    .putBoolean("alarm_sound_5m", false)
+                                                    .putBoolean("alarm_vibrate_5m", false)
+                                                    .apply()
+                                                showToggleMessage("Notifications turned off")
+                                            } else {
+                                                if (notificationsBlockedByRoute) {
+                                                    vm.setNotificationsEnabled(false)
+                                                    alertPrefs.edit()
+                                                        .putBoolean(
+                                                            "master_notifications_enabled",
+                                                            false
+                                                        )
+                                                        .apply()
+                                                    showToggleMessage(
+                                                        if (isFriday) {
+                                                            "Select a Friday route (not ALL) to enable notifications"
+                                                        } else {
+                                                            "Select a daily route (not ALL) to enable notifications"
+                                                        }
+                                                    )
+                                                } else if (hasNotificationPermissionNow()) {
+                                                    vm.setNotificationsEnabled(true)
+
+                                                    alarmVibrate5mEnabled = true
+                                                    alarmSound5mEnabled = alertPrefs.getBoolean(
+                                                        "alarm_sound_5m",
+                                                        false
+                                                    )
+
+                                                    alertPrefs.edit()
+                                                        .putBoolean(
+                                                            "master_notifications_enabled",
+                                                            true
+                                                        )
+                                                        .putBoolean("alarm_vibrate_5m", true)
+                                                        .putBoolean(
+                                                            "alarm_sound_5m",
+                                                            alarmSound5mEnabled
+                                                        )
+                                                        .apply()
+                                                    showToggleMessage("Notifications enabled")
+                                                } else {
+                                                    vm.setNotificationsEnabled(false)
+                                                    alertPrefs.edit()
+                                                        .putBoolean(
+                                                            "master_notifications_enabled",
+                                                            false
+                                                        )
+                                                        .apply()
+
+                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                                        hostActivity?.showPermissionIntroThenRequest(
+                                                            permission = Manifest.permission.POST_NOTIFICATIONS,
+                                                            requestAction = {
+                                                                notificationPermissionLauncher.launch(
+                                                                    Manifest.permission.POST_NOTIFICATIONS
+                                                                )
+                                                            }
+                                                        )
+                                                    } else {
+                                                        try {
+                                                            val intent =
+                                                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                                                    putExtra(
+                                                                        Settings.EXTRA_APP_PACKAGE,
+                                                                        ctx.packageName
+                                                                    )
+                                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                                }
+                                                            ctx.startActivity(intent)
+                                                        } catch (_: Throwable) {
+                                                            val fallback =
+                                                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                                                    Intent.setData = Uri.fromParts(
+                                                                        "package",
+                                                                        ctx.packageName,
+                                                                        null
+                                                                    )
+                                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                                }
+                                                            ctx.startActivity(fallback)
+                                                        }
+                                                        showToggleMessage("Enable app notifications from Settings")
+                                                    }
+                                                }
+                                            }
                                         },
-                                        enabled = effectiveNotificationsEnabled,
+                                        enabled = true,
                                         colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                                     )
                                 }
 
-                                AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmSound5mEnabled) {
-                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        HorizontalDivider(
-                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider
-                                        )
+                                if (notificationsBlockedByRoute) {
+                                    Text(
+                                        text = if (isFriday)
+                                            "Today is Friday — only the Friday route dropdown controls whether notifications can be on."
+                                        else
+                                            "Any day except Friday — only the daily route dropdown controls whether notifications can be on.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = secondaryText
+                                    )
+                                }
 
-                                        Text(
-                                            text = "Ringtone duration",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = primaryText,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
+                                HorizontalDivider(
+                                    color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
+                                    else premiumLightDivider
+                                )
 
-                                        Text(
-                                            text = "Choose how long ringtone should continue",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = secondaryText
-                                        )
-
-                                        ExposedDropdownMenuBox(
-                                            expanded = alarmSoundDurationMenuExpanded,
-                                            onExpandedChange = { alarmSoundDurationMenuExpanded = !alarmSoundDurationMenuExpanded }
-                                        ) {
-                                            val selectedAlarmSoundDurationLabel = alarmDurationOptions.firstOrNull {
-                                                it.first == alarmSoundDurationMs
-                                            }?.second ?: "30 sec"
-
-                                            OutlinedTextField(
-                                                value = selectedAlarmSoundDurationLabel,
-                                                onValueChange = {},
-                                                readOnly = true,
-                                                singleLine = true,
-                                                modifier = Modifier
-                                                    .menuAnchor()
-                                                    .fillMaxWidth(),
-                                                shape = RoundedCornerShape(18.dp),
-                                                label = { Text("Ringtone duration") },
-                                                trailingIcon = {
-                                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = alarmSoundDurationMenuExpanded)
-                                                },
-                                                colors = OutlinedTextFieldDefaults.colors(
-                                                    focusedBorderColor = if (alarmSoundDurationMenuExpanded)
-                                                        (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
-                                                    else
-                                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
-                                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
-                                                    focusedTextColor = primaryText,
-                                                    unfocusedTextColor = primaryText,
-                                                    focusedLabelColor = if (alarmSoundDurationMenuExpanded)
-                                                        (if (dark) Color.White else MaterialTheme.colorScheme.primary)
-                                                    else
-                                                        (if (dark) Color.White else secondaryText),
-                                                    unfocusedLabelColor = if (dark) Color.White else secondaryText,
-                                                    focusedContainerColor = Color.Transparent,
-                                                    unfocusedContainerColor = Color.Transparent
-                                                )
-                                            )
-
-                                            ExposedDropdownMenu(
-                                                expanded = alarmSoundDurationMenuExpanded,
-                                                onDismissRequest = { alarmSoundDurationMenuExpanded = false },
-                                                modifier = Modifier
-                                                    .exposedDropdownSize()
-                                                    .background(MaterialTheme.colorScheme.surface)
-                                            ) {
-                                                alarmDurationOptions.forEach { (durationMs, label) ->
-                                                    DropdownMenuItem(
-                                                        text = {
-                                                            Text(
-                                                                text = label,
-                                                                color = if (durationMs == alarmSoundDurationMs) {
-                                                                    if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                                                                } else {
-                                                                    MaterialTheme.colorScheme.onSurface
-                                                                },
-                                                                fontWeight = if (durationMs == alarmSoundDurationMs) FontWeight.SemiBold else FontWeight.Normal
-                                                            )
-                                                        },
-                                                        onClick = {
-                                                            alarmSoundDurationMenuExpanded = false
-                                                            alarmSoundDurationMs = durationMs
-                                                            alertPrefs.edit()
-                                                                .putLong("alarm_sound_duration_ms", durationMs)
-                                                                .apply()
-                                                            showToggleMessage("Ringtone duration set to $label")
-                                                        }
-                                                    )
-                                                }
-                                            }
-                                        }
+                                // --- Notification lead time state ---
+                                var notifyLeadMinutesDraft by remember(notifyLeadMinutes) {
+                                    mutableStateOf(notifyLeadMinutes.toFloat())
+                                }
+                                var notifyLeadMinutesDragging by remember { mutableStateOf(false) }
+                                LaunchedEffect(notifyLeadMinutes) {
+                                    if (!notifyLeadMinutesDragging) {
+                                        notifyLeadMinutesDraft = notifyLeadMinutes.toFloat()
                                     }
                                 }
 
-                                AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmSound5mEnabled) {
-                                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        Spacer(Modifier.height(4.dp))
+                                AnimatedVisibility(visible = effectiveNotificationsEnabled) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(
+                                            text = "Notify me ${
+                                                notifyLeadMinutesDraft.toInt().coerceIn(5, 120)
+                                            } minutes before",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = primaryText
+                                        )
+
+                                        Slider(
+                                            value = notifyLeadMinutesDraft,
+                                            onValueChange = {
+                                                notifyLeadMinutesDragging = true
+                                                notifyLeadMinutesDraft = it
+                                            },
+                                            onValueChangeFinished = {
+                                                notifyLeadMinutesDragging = false
+                                                val finalLeadMinutes =
+                                                    notifyLeadMinutesDraft.toInt().coerceIn(5, 120)
+                                                resetAlarmStateForNotifyTimeChange(
+                                                    ctx
+                                                )
+                                                vm.setNotifyLeadMinutes(finalLeadMinutes)
+                                                notifyLeadMinutesDraft = finalLeadMinutes.toFloat()
+                                                val now = System.currentTimeMillis()
+                                                val lastShown = ctx.getSharedPreferences(
+                                                    "notify_toast_guard",
+                                                    Context.MODE_PRIVATE
+                                                )
+                                                    .getLong("last_notify_toast", 0L)
+
+                                                if (now - lastShown > 3000) {
+                                                    ctx.getSharedPreferences(
+                                                        "notify_toast_guard",
+                                                        Context.MODE_PRIVATE
+                                                    )
+                                                        .edit()
+                                                        .putLong("last_notify_toast", now)
+                                                        .apply()
+
+                                                    scope.launch {
+                                                        delay(400)
+                                                        showToggleMessage("Notify time updated. Alarm, notification and vibration reset.")
+                                                    }
+                                                }
+                                            },
+                                            valueRange = 5f..120f,
+                                            steps = 22,
+                                            colors = if (dark) SliderDefaults.colors(
+                                                thumbColor = MaterialTheme.colorScheme.secondary,
+                                                activeTrackColor = MaterialTheme.colorScheme.secondary,
+                                                inactiveTrackColor = MaterialTheme.colorScheme.secondary.copy(
+                                                    alpha = 0.30f
+                                                )
+                                            ) else SliderDefaults.colors()
+                                        )
 
                                         Text(
-                                            text = customRingtoneName,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(14.dp))
-                                                .background(
-                                                    if (hasPickedCustomFile) {
-                                                        if (dark) {
-                                                            MaterialTheme.colorScheme.secondary.copy(
-                                                                alpha = 0.16f
-                                                            )
-                                                        } else {
-                                                            MaterialTheme.colorScheme.primary.copy(
-                                                                alpha = 0.10f
-                                                            )
-                                                        }
-                                                    } else {
-                                                        if (dark) {
-                                                            MaterialTheme.colorScheme.onSurface.copy(
-                                                                alpha = 0.04f
-                                                            )
-                                                        } else {
-                                                            MaterialTheme.colorScheme.onSurface.copy(
-                                                                alpha = 0.025f
-                                                            )
-                                                        }
-                                                    }
-                                                )
-                                                .border(
-                                                    width = if (hasPickedCustomFile) 1.dp else 0.8.dp,
-                                                    color = if (hasPickedCustomFile) {
-                                                        if (dark) {
-                                                            MaterialTheme.colorScheme.secondary.copy(
-                                                                alpha = 0.55f
-                                                            )
-                                                        } else {
-                                                            MaterialTheme.colorScheme.primary.copy(
-                                                                alpha = 0.28f
-                                                            )
-                                                        }
-                                                    } else {
-                                                        MaterialTheme.colorScheme.onSurface.copy(
-                                                            alpha = if (dark) 0.10f else 0.08f
-                                                        )
-                                                    },
-                                                    shape = RoundedCornerShape(14.dp)
-                                                )
-                                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                                            color = if (hasPickedCustomFile) {
-                                                if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                                            } else {
-                                                primaryText
-                                            },
-                                            fontWeight = if (hasPickedCustomFile) FontWeight.SemiBold else FontWeight.Medium,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            text = "Default: 30 minutes",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = primaryText
+                                        )
+                                    }
+                                    HorizontalDivider(
+                                        color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
+                                            alpha = 0.10f
+                                        ) else premiumLightDivider
+                                    )
+                                }
+                                AnimatedVisibility(visible = effectiveNotificationsEnabled) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                                        HorizontalDivider(
+                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
+                                                alpha = 0.10f
+                                            ) else premiumLightDivider
                                         )
 
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            androidx.compose.material3.OutlinedButton(
-                                                onClick = { showRingtonePickerPage = true },
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .height(44.dp)
-                                            ) {
+                                            Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    text = "Custom",
-                                                    color = if (dark) Color.White else Color.Black,
-                                                    fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+                                                    text = "Ringtone",
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    color = primaryText
+                                                )
+                                                Text(
+                                                    text = "Play alarm ringtone when a notice arrives",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = secondaryText
                                                 )
                                             }
-
-                                            androidx.compose.material3.OutlinedButton(
-                                                onClick = {
-                                                    stopPreviewRingtone()
-                                                    customRingtoneUri = appDefaultRingtoneUri
-                                                    customRingtoneName = appDefaultRingtoneName
+                                            Switch(
+                                                checked = alarmSound5mEnabled,
+                                                onCheckedChange = {
+                                                    alarmSound5mEnabled = it
                                                     alertPrefs.edit()
-                                                        .putString(
-                                                            "custom_ringtone_uri",
-                                                            appDefaultRingtoneUri
-                                                        )
-                                                        .putString(
-                                                            "custom_ringtone_name",
-                                                            appDefaultRingtoneName
-                                                        )
+                                                        .putBoolean("alarm_sound_5m", it)
                                                         .apply()
-
-                                                    showToggleMessage("App default ringtone selected")
+                                                    showToggleMessage(if (it) "Ringtone ON" else "Ringtone OFF")
                                                 },
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .height(44.dp)
-                                            ) {
-                                                Text(
-                                                    text = "Use default",
-                                                    color = if (dark) Color.White else Color.Black,
-                                                    fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
-                                                )
-                                            }
-                                        }
-                                        Spacer(Modifier.height(8.dp))
-                                    }
-                                }
-
-                                HorizontalDivider(
-                                    color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
-                                        alpha = 0.10f
-                                    ) else premiumLightDivider
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = "Vibration",
-                                            style = MaterialTheme.typography.bodyLarge,
-                                            color = primaryText
-                                        )
-                                        Text(
-                                            text = "Vibrate strongly when a notice arrives",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = secondaryText
-                                        )
-                                    }
-                                    Switch(
-                                        checked = alarmVibrate5mEnabled,
-                                        onCheckedChange = {
-                                            alarmVibrate5mEnabled = it
-                                            alertPrefs.edit().putBoolean("alarm_vibrate_5m", it)
-                                                .apply()
-                                            showToggleMessage(if (it) "Vibration ON" else "Vibration OFF")
-                                        },
-                                        enabled = effectiveNotificationsEnabled,
-                                        colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
-                                    )
-                                }
-
-                                AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmVibrate5mEnabled) {
-                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        HorizontalDivider(
-                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f) else premiumLightDivider
-                                        )
-
-                                        Text(
-                                            text = "Vibration duration",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = primaryText,
-                                            fontWeight = FontWeight.SemiBold
-                                        )
-
-                                        Text(
-                                            text = "Choose how long vibration should continue",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = secondaryText
-                                        )
-
-                                        ExposedDropdownMenuBox(
-                                            expanded = alarmVibrateDurationMenuExpanded,
-                                            onExpandedChange = { alarmVibrateDurationMenuExpanded = !alarmVibrateDurationMenuExpanded }
-                                        ) {
-                                            val selectedAlarmVibrateDurationLabel = alarmDurationOptions.firstOrNull {
-                                                it.first == alarmVibrateDurationMs
-                                            }?.second ?: "30 sec"
-
-                                            OutlinedTextField(
-                                                value = selectedAlarmVibrateDurationLabel,
-                                                onValueChange = {},
-                                                readOnly = true,
-                                                singleLine = true,
-                                                modifier = Modifier
-                                                    .menuAnchor()
-                                                    .fillMaxWidth(),
-                                                shape = RoundedCornerShape(18.dp),
-                                                label = { Text("Vibration duration") },
-                                                trailingIcon = {
-                                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = alarmVibrateDurationMenuExpanded)
-                                                },
-                                                colors = OutlinedTextFieldDefaults.colors(
-                                                    focusedBorderColor = if (alarmVibrateDurationMenuExpanded)
-                                                        (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
-                                                    else
-                                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
-                                                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f),
-                                                    focusedTextColor = primaryText,
-                                                    unfocusedTextColor = primaryText,
-                                                    focusedLabelColor = if (alarmVibrateDurationMenuExpanded)
-                                                        (if (dark) Color.White else MaterialTheme.colorScheme.primary)
-                                                    else
-                                                        (if (dark) Color.White else secondaryText),
-                                                    unfocusedLabelColor = if (dark) Color.White else secondaryText,
-                                                    focusedContainerColor = Color.Transparent,
-                                                    unfocusedContainerColor = Color.Transparent
-                                                )
+                                                enabled = effectiveNotificationsEnabled,
+                                                colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                                             )
+                                        }
 
-                                            ExposedDropdownMenu(
-                                                expanded = alarmVibrateDurationMenuExpanded,
-                                                onDismissRequest = { alarmVibrateDurationMenuExpanded = false },
-                                                modifier = Modifier
-                                                    .exposedDropdownSize()
-                                                    .background(MaterialTheme.colorScheme.surface)
-                                            ) {
-                                                alarmDurationOptions.forEach { (durationMs, label) ->
-                                                    DropdownMenuItem(
-                                                        text = {
-                                                            Text(
-                                                                text = label,
-                                                                color = if (durationMs == alarmVibrateDurationMs) {
-                                                                    if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                                                                } else {
-                                                                    MaterialTheme.colorScheme.onSurface
-                                                                },
-                                                                fontWeight = if (durationMs == alarmVibrateDurationMs) FontWeight.SemiBold else FontWeight.Normal
+                                        AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmSound5mEnabled) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                HorizontalDivider(
+                                                    color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
+                                                        alpha = 0.10f
+                                                    ) else premiumLightDivider
+                                                )
+
+                                                Text(
+                                                    text = "Ringtone duration",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    color = primaryText,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+
+                                                Text(
+                                                    text = "Choose how long ringtone should continue",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = secondaryText
+                                                )
+
+                                                ExposedDropdownMenuBox(
+                                                    expanded = alarmSoundDurationMenuExpanded,
+                                                    onExpandedChange = {
+                                                        alarmSoundDurationMenuExpanded =
+                                                            !alarmSoundDurationMenuExpanded
+                                                    }
+                                                ) {
+                                                    val selectedAlarmSoundDurationLabel =
+                                                        alarmDurationOptions.firstOrNull {
+                                                            it.first == alarmSoundDurationMs
+                                                        }?.second ?: "30 sec"
+
+                                                    OutlinedTextField(
+                                                        value = selectedAlarmSoundDurationLabel,
+                                                        onValueChange = {},
+                                                        readOnly = true,
+                                                        singleLine = true,
+                                                        modifier = Modifier
+                                                            .menuAnchor()
+                                                            .fillMaxWidth(),
+                                                        shape = RoundedCornerShape(18.dp),
+                                                        label = { Text("Ringtone duration") },
+                                                        trailingIcon = {
+                                                            ExposedDropdownMenuDefaults.TrailingIcon(
+                                                                expanded = alarmSoundDurationMenuExpanded
                                                             )
                                                         },
-                                                        onClick = {
-                                                            alarmVibrateDurationMenuExpanded = false
-                                                            alarmVibrateDurationMs = durationMs
-                                                            alertPrefs.edit()
-                                                                .putLong("alarm_vibrate_duration_ms", durationMs)
-                                                                .apply()
-                                                            showToggleMessage("Vibration duration set to $label")
-                                                        }
+                                                        colors = OutlinedTextFieldDefaults.colors(
+                                                            focusedBorderColor = if (alarmSoundDurationMenuExpanded)
+                                                                (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+                                                            else
+                                                                MaterialTheme.colorScheme.outline.copy(
+                                                                    alpha = 0.6f
+                                                                ),
+                                                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(
+                                                                alpha = 0.6f
+                                                            ),
+                                                            focusedTextColor = primaryText,
+                                                            unfocusedTextColor = primaryText,
+                                                            focusedLabelColor = if (alarmSoundDurationMenuExpanded)
+                                                                (if (dark) Color.White else MaterialTheme.colorScheme.primary)
+                                                            else
+                                                                (if (dark) Color.White else secondaryText),
+                                                            unfocusedLabelColor = if (dark) Color.White else secondaryText,
+                                                            focusedContainerColor = Color.Transparent,
+                                                            unfocusedContainerColor = Color.Transparent
+                                                        )
                                                     )
+
+                                                    ExposedDropdownMenu(
+                                                        expanded = alarmSoundDurationMenuExpanded,
+                                                        onDismissRequest = {
+                                                            alarmSoundDurationMenuExpanded = false
+                                                        },
+                                                        modifier = Modifier
+                                                            .exposedDropdownSize()
+                                                            .background(MaterialTheme.colorScheme.surface)
+                                                    ) {
+                                                        alarmDurationOptions.forEach { (durationMs, label) ->
+                                                            DropdownMenuItem(
+                                                                text = {
+                                                                    Text(
+                                                                        text = label,
+                                                                        color = if (durationMs == alarmSoundDurationMs) {
+                                                                            if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                                                        } else {
+                                                                            MaterialTheme.colorScheme.onSurface
+                                                                        },
+                                                                        fontWeight = if (durationMs == alarmSoundDurationMs) FontWeight.SemiBold else FontWeight.Normal
+                                                                    )
+                                                                },
+                                                                onClick = {
+                                                                    alarmSoundDurationMenuExpanded =
+                                                                        false
+                                                                    alarmSoundDurationMs =
+                                                                        durationMs
+                                                                    alertPrefs.edit()
+                                                                        .putLong(
+                                                                            "alarm_sound_duration_ms",
+                                                                            durationMs
+                                                                        )
+                                                                        .apply()
+                                                                    showToggleMessage("Ringtone duration set to $label")
+                                                                }
+                                                            )
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                }
 
-                                AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmVibrate5mEnabled) {
-                                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        Spacer(Modifier.height(4.dp))
+                                        AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmSound5mEnabled) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                Spacer(Modifier.height(4.dp))
 
-                                        Text(
-                                            text = customVibrationPattern,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = secondaryText
+                                                Text(
+                                                    text = customRingtoneName,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(14.dp))
+                                                        .background(
+                                                            if (hasPickedCustomFile) {
+                                                                if (dark) {
+                                                                    MaterialTheme.colorScheme.secondary.copy(
+                                                                        alpha = 0.16f
+                                                                    )
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.primary.copy(
+                                                                        alpha = 0.10f
+                                                                    )
+                                                                }
+                                                            } else {
+                                                                if (dark) {
+                                                                    MaterialTheme.colorScheme.onSurface.copy(
+                                                                        alpha = 0.04f
+                                                                    )
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.onSurface.copy(
+                                                                        alpha = 0.025f
+                                                                    )
+                                                                }
+                                                            }
+                                                        )
+                                                        .border(
+                                                            width = if (hasPickedCustomFile) 1.dp else 0.8.dp,
+                                                            color = if (hasPickedCustomFile) {
+                                                                if (dark) {
+                                                                    MaterialTheme.colorScheme.secondary.copy(
+                                                                        alpha = 0.55f
+                                                                    )
+                                                                } else {
+                                                                    MaterialTheme.colorScheme.primary.copy(
+                                                                        alpha = 0.28f
+                                                                    )
+                                                                }
+                                                            } else {
+                                                                MaterialTheme.colorScheme.onSurface.copy(
+                                                                    alpha = if (dark) 0.10f else 0.08f
+                                                                )
+                                                            },
+                                                            shape = RoundedCornerShape(14.dp)
+                                                        )
+                                                        .padding(
+                                                            horizontal = 12.dp,
+                                                            vertical = 10.dp
+                                                        ),
+                                                    color = if (hasPickedCustomFile) {
+                                                        if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                                    } else {
+                                                        primaryText
+                                                    },
+                                                    fontWeight = if (hasPickedCustomFile) FontWeight.SemiBold else FontWeight.Medium,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                ) {
+                                                    OutlinedButton(
+                                                        onClick = { showRingtonePickerPage = true },
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(44.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "Custom",
+                                                            color = if (dark) Color.White else Color.Black,
+                                                            fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+                                                        )
+                                                    }
+
+                                                    OutlinedButton(
+                                                        onClick = {
+                                                            stopPreviewRingtone()
+                                                            customRingtoneUri =
+                                                                appDefaultRingtoneUri
+                                                            customRingtoneName =
+                                                                appDefaultRingtoneName
+                                                            alertPrefs.edit()
+                                                                .putString(
+                                                                    "custom_ringtone_uri",
+                                                                    appDefaultRingtoneUri
+                                                                )
+                                                                .putString(
+                                                                    "custom_ringtone_name",
+                                                                    appDefaultRingtoneName
+                                                                )
+                                                                .apply()
+
+                                                            showToggleMessage("App default ringtone selected")
+                                                        },
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(44.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = "Use default",
+                                                            color = if (dark) Color.White else Color.Black,
+                                                            fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+                                                        )
+                                                    }
+                                                }
+                                                Spacer(Modifier.height(8.dp))
+                                            }
+                                        }
+
+                                        HorizontalDivider(
+                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
+                                                alpha = 0.10f
+                                            ) else premiumLightDivider
                                         )
 
-                                        androidx.compose.material3.OutlinedButton(
-                                            onClick = { showVibrationPickerPage = true },
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(44.dp)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Text(
-                                                text = "Custom vibration",
-                                                color = if (dark) Color.White else Color.Black,
-                                                fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "Vibration",
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    color = primaryText
+                                                )
+                                                Text(
+                                                    text = "Vibrate strongly when a notice arrives",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = secondaryText
+                                                )
+                                            }
+                                            Switch(
+                                                checked = alarmVibrate5mEnabled,
+                                                onCheckedChange = {
+                                                    alarmVibrate5mEnabled = it
+                                                    alertPrefs.edit()
+                                                        .putBoolean("alarm_vibrate_5m", it)
+                                                        .apply()
+                                                    showToggleMessage(if (it) "Vibration ON" else "Vibration OFF")
+                                                },
+                                                enabled = effectiveNotificationsEnabled,
+                                                colors = if (dark) greenSwitchColors else SwitchDefaults.colors()
                                             )
                                         }
 
-                                        Spacer(Modifier.height(8.dp))
+                                        AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmVibrate5mEnabled) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                HorizontalDivider(
+                                                    color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
+                                                        alpha = 0.10f
+                                                    ) else premiumLightDivider
+                                                )
+
+                                                Text(
+                                                    text = "Vibration duration",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    color = primaryText,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+
+                                                Text(
+                                                    text = "Choose how long vibration should continue",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = secondaryText
+                                                )
+
+                                                ExposedDropdownMenuBox(
+                                                    expanded = alarmVibrateDurationMenuExpanded,
+                                                    onExpandedChange = {
+                                                        alarmVibrateDurationMenuExpanded =
+                                                            !alarmVibrateDurationMenuExpanded
+                                                    }
+                                                ) {
+                                                    val selectedAlarmVibrateDurationLabel =
+                                                        alarmDurationOptions.firstOrNull {
+                                                            it.first == alarmVibrateDurationMs
+                                                        }?.second ?: "30 sec"
+
+                                                    OutlinedTextField(
+                                                        value = selectedAlarmVibrateDurationLabel,
+                                                        onValueChange = {},
+                                                        readOnly = true,
+                                                        singleLine = true,
+                                                        modifier = Modifier
+                                                            .menuAnchor()
+                                                            .fillMaxWidth(),
+                                                        shape = RoundedCornerShape(18.dp),
+                                                        label = { Text("Vibration duration") },
+                                                        trailingIcon = {
+                                                            ExposedDropdownMenuDefaults.TrailingIcon(
+                                                                expanded = alarmVibrateDurationMenuExpanded
+                                                            )
+                                                        },
+                                                        colors = OutlinedTextFieldDefaults.colors(
+                                                            focusedBorderColor = if (alarmVibrateDurationMenuExpanded)
+                                                                (if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+                                                            else
+                                                                MaterialTheme.colorScheme.outline.copy(
+                                                                    alpha = 0.6f
+                                                                ),
+                                                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(
+                                                                alpha = 0.6f
+                                                            ),
+                                                            focusedTextColor = primaryText,
+                                                            unfocusedTextColor = primaryText,
+                                                            focusedLabelColor = if (alarmVibrateDurationMenuExpanded)
+                                                                (if (dark) Color.White else MaterialTheme.colorScheme.primary)
+                                                            else
+                                                                (if (dark) Color.White else secondaryText),
+                                                            unfocusedLabelColor = if (dark) Color.White else secondaryText,
+                                                            focusedContainerColor = Color.Transparent,
+                                                            unfocusedContainerColor = Color.Transparent
+                                                        )
+                                                    )
+
+                                                    ExposedDropdownMenu(
+                                                        expanded = alarmVibrateDurationMenuExpanded,
+                                                        onDismissRequest = {
+                                                            alarmVibrateDurationMenuExpanded = false
+                                                        },
+                                                        modifier = Modifier
+                                                            .exposedDropdownSize()
+                                                            .background(MaterialTheme.colorScheme.surface)
+                                                    ) {
+                                                        alarmDurationOptions.forEach { (durationMs, label) ->
+                                                            DropdownMenuItem(
+                                                                text = {
+                                                                    Text(
+                                                                        text = label,
+                                                                        color = if (durationMs == alarmVibrateDurationMs) {
+                                                                            if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                                                        } else {
+                                                                            MaterialTheme.colorScheme.onSurface
+                                                                        },
+                                                                        fontWeight = if (durationMs == alarmVibrateDurationMs) FontWeight.SemiBold else FontWeight.Normal
+                                                                    )
+                                                                },
+                                                                onClick = {
+                                                                    alarmVibrateDurationMenuExpanded =
+                                                                        false
+                                                                    alarmVibrateDurationMs =
+                                                                        durationMs
+                                                                    alertPrefs.edit()
+                                                                        .putLong(
+                                                                            "alarm_vibrate_duration_ms",
+                                                                            durationMs
+                                                                        )
+                                                                        .apply()
+                                                                    showToggleMessage("Vibration duration set to $label")
+                                                                }
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        AnimatedVisibility(visible = effectiveNotificationsEnabled && alarmVibrate5mEnabled) {
+                                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                                Spacer(Modifier.height(4.dp))
+
+                                                Text(
+                                                    text = customVibrationPattern,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = secondaryText
+                                                )
+
+                                                OutlinedButton(
+                                                    onClick = { showVibrationPickerPage = true },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(44.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "Custom vibration",
+                                                        color = if (dark) Color.White else Color.Black,
+                                                        fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+                                                    )
+                                                }
+
+                                                Spacer(Modifier.height(8.dp))
+                                            }
+                                        }
+                                        Spacer(Modifier.height(16.dp))
+
+                                        Card(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    showNotificationOptimizationPage = true
+                                                },
+                                            shape = RoundedCornerShape(22.dp),
+                                            elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                                            border = BorderStroke(
+                                                1.dp,
+                                                if (dark) MaterialTheme.colorScheme.onSurface.copy(
+                                                    alpha = 0.15f
+                                                )
+                                                else premiumLightBorder
+                                            ),
+                                            colors = CardDefaults.cardColors(
+                                                containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
+                                            )
+                                        ) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "Notification Optimization",
+                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    color = primaryText,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+
+                                                Text(
+                                                    text = "Open phone settings guide to reduce notification delay",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = secondaryText
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-
-                        Text(
-                            text = "These settings are saved automatically.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
-                Spacer(Modifier.height(12.dp))
+            }
+        }
+
 
                 val versionName = remember {
                     runCatching {
@@ -2135,7 +2368,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                         containerColor = if (dark) {
                             MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
                         } else {
-                            premiumLightCard
+                            CardSurfaceLight
                         }
                     )
                 ) {
@@ -2177,14 +2410,14 @@ fun ProfileScreen(vm: HomeViewModel) {
                 }
 
                 if (showRingtonePickerPage) {
-                    androidx.compose.material3.AlertDialog(
+                    AlertDialog(
                         onDismissRequest = {
                             stopPreviewRingtone()
                             showRingtonePickerPage = false
                         },
                         confirmButton = {},
                         dismissButton = {
-                            androidx.compose.material3.TextButton(
+                            TextButton(
                                 onClick = {
                                     stopPreviewRingtone()
                                     showRingtonePickerPage = false
@@ -2252,7 +2485,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             if (customRingtoneUri == appDefaultRingtoneUri) MaterialTheme.colorScheme.primary.copy(
                                                 alpha = 0.08f
                                             )
-                                            else premiumLightCard
+                                            else CardSurfaceLight
                                         }
                                     ),
                                     border = BorderStroke(
@@ -2310,7 +2543,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
-                                            androidx.compose.material3.OutlinedButton(
+                                            OutlinedButton(
                                                 onClick = {
                                                     playPreviewRingtone(appDefaultRingtoneUri)
                                                 },
@@ -2337,7 +2570,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 )
                                             }
 
-                                            androidx.compose.material3.OutlinedButton(
+                                            OutlinedButton(
                                                 onClick = {
                                                     stopPreviewRingtone()
                                                     customRingtoneUri = appDefaultRingtoneUri
@@ -2387,7 +2620,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         ),
                                     shape = RoundedCornerShape(20.dp),
                                     colors = CardDefaults.cardColors(
-                                        containerColor = if (dark) MaterialTheme.colorScheme.surface else premiumLightCard
+                                        containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
                                     ),
                                     border = BorderStroke(
                                         1.dp,
@@ -2413,7 +2646,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             color = secondaryText
                                         )
 
-                                        androidx.compose.material3.OutlinedButton(
+                                        OutlinedButton(
                                             onClick = {
                                                 stopPreviewRingtone()
                                                 showToggleMessage("Opening file manager...")
@@ -2469,7 +2702,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 if (isSelected) MaterialTheme.colorScheme.primary.copy(
                                                     alpha = 0.08f
                                                 )
-                                                else premiumLightCard
+                                                else CardSurfaceLight
                                             }
                                         ),
                                         border = BorderStroke(
@@ -2535,7 +2768,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                                             ) {
-                                                androidx.compose.material3.OutlinedButton(
+                                                OutlinedButton(
                                                     onClick = {
                                                         if (previewingUri == ringtoneUrl) {
                                                             stopPreviewRingtone()
@@ -2583,7 +2816,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                     )
                                                 }
 
-                                                androidx.compose.material3.OutlinedButton(
+                                                OutlinedButton(
                                                     onClick = {
                                                         scope.launch {
                                                             presetBusyName = ringtoneName
@@ -2637,11 +2870,11 @@ fun ProfileScreen(vm: HomeViewModel) {
                 }
 
                 if (showVibrationPickerPage) {
-                    androidx.compose.material3.AlertDialog(
+                    AlertDialog(
                         onDismissRequest = { showVibrationPickerPage = false },
                         confirmButton = {},
                         dismissButton = {
-                            androidx.compose.material3.TextButton(onClick = {
+                            TextButton(onClick = {
                                 showVibrationPickerPage = false
                             }) {
                                 Text(
@@ -2706,7 +2939,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 if (isSelected) MaterialTheme.colorScheme.primary.copy(
                                                     alpha = 0.08f
                                                 )
-                                                else premiumLightCard
+                                                else CardSurfaceLight
                                             }
                                         ),
                                         border = BorderStroke(
@@ -2784,7 +3017,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                                             ) {
-                                                androidx.compose.material3.OutlinedButton(
+                                                OutlinedButton(
                                                     onClick = {
                                                         previewingVibrationPattern = pattern
                                                         playPreviewVibration(pattern)
@@ -2850,7 +3083,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                     }
                                                 }
 
-                                                androidx.compose.material3.OutlinedButton(
+                                                OutlinedButton(
                                                     onClick = {
                                                         customVibrationPattern = pattern
                                                         previewingVibrationPattern = ""
@@ -2884,9 +3117,378 @@ fun ProfileScreen(vm: HomeViewModel) {
                 }
             }
         }
+        if (showNotificationOptimizationPage) {
+            Dialog(
+                onDismissRequest = { showNotificationOptimizationPage = false },
+                properties = DialogProperties(
+                    usePlatformDefaultWidth = false,
+                    dismissOnBackPress = true,
+                    dismissOnClickOutside = false
+                )
+            ) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(start = 16.dp, end = 16.dp, top = 16.dp)
+                            .padding(bottom = 24.dp + navBarBottomPad),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Spacer(Modifier.height(20.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(
+                                            if (dark) MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f)
+                                            else MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.SettingsApplications,
+                                        contentDescription = "Notification Optimization",
+                                        tint = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        text = "Notification Optimization",
+                                        style = MaterialTheme.typography.headlineSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = primaryText
+                                    )
+                                    Text(
+                                        text = "Make alerts faster and more reliable",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = secondaryText
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = "Back",
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { showNotificationOptimizationPage = false }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(24.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                            border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Fix your class notification delay issue",
+                                    style = MaterialTheme.typography.titleLarge,
+                                    color = primaryText,
+                                    fontWeight = FontWeight.Bold
+                                )
+
+                                Text(
+                                    text = "Follow these steps to make sure notifications arrive on time and the app keeps running properly in the background.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = secondaryText
+                                )
+                            }
+                        }
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(24.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                            border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (dark) MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f)
+                                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.BatteryChargingFull,
+                                            contentDescription = "Battery optimization",
+                                            tint = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "Turn off battery optimization",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = primaryText,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Let the app run in the background",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = secondaryText
+                                        )
+                                    }
+                                }
+                                Text(text = "1. Open your phone Settings", color = primaryText)
+                                Text(text = "2. Go to Battery or App battery settings (name may vary)", color = primaryText)
+                                Text(text = "3. Find \"DIU Transport Schedule\" in the app list", color = primaryText)
+                                Text(text = "4. Select \"No restriction\", \"Unrestricted\" or \"Don't optimize\"", color = primaryText)
+                            }
+                        }
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(24.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                            border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (dark) MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f)
+                                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.CleaningServices,
+                                            contentDescription = "Clear cache",
+                                            tint = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "Clear app cache",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = primaryText,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Remove temporary files",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = secondaryText
+                                        )
+                                    }
+                                }
+
+                                Text(text = "1. Open Settings > Apps or App management", color = primaryText)
+                                Text(text = "2. Select \"DIU Transport Schedule\"", color = primaryText)
+                                Text(text = "3. Open Storage or Storage & cache", color = primaryText)
+                                Text(text = "4. Tap Clear cache", color = primaryText)
+                            }
+                        }
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(24.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                            border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (dark) MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f)
+                                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.OpenInNew,
+                                            contentDescription = "Background activity",
+                                            tint = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "Allow background activity",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = primaryText,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Keep the app running when not in use",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = secondaryText
+                                        )
+                                    }
+                                }
+                                Text(text = "1. Open Settings > Apps or App management", color = primaryText)
+                                Text(text = "2. Select \"DIU Transport Schedule\"", color = primaryText)
+                                Text(text = "3. Go to Battery or App battery settings", color = primaryText)
+                                Text(text = "4. Enable background activity / auto-start (if available)", color = primaryText)
+                            }
+                        }
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(24.dp),
+                            elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                            border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (dark) MaterialTheme.colorScheme.surface else CardSurfaceLight
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(18.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (dark) MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f)
+                                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.OpenInNew,
+                                            contentDescription = "Open settings",
+                                            tint = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+
+                                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(
+                                            text = "Open App Settings",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = primaryText,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "Open your phone settings directly for this app",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = secondaryText
+                                        )
+                                    }
+                                }
+
+                                Button(
+                                    onClick = {
+                                        try {
+                                            val intent = Intent(
+                                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                                            )
+                                            intent.data = Uri.parse("package:${ctx.packageName}")
+                                            ctx.startActivity(intent)
+                                        } catch (e: Exception) {
+                                            val intent = Intent(Settings.ACTION_SETTINGS)
+                                            ctx.startActivity(intent)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.OpenInNew,
+                                            contentDescription = "Open settings"
+                                        )
+                                        Text(
+                                            text = "Open App Settings",
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+        }
     }
 }
-
 @Immutable
 private data class RouteDropdownUi(
     val routeNo: String,
@@ -3014,7 +3616,7 @@ fun compactRouteOptionLabel(routeNo: String, label: String): String {
 
 
 // Compatibility: older Material3 versions may not include ColorScheme.surfaceColorAtElevation
-private fun androidx.compose.material3.ColorScheme.surfaceColorAtElevation(elevation: Dp): Color {
+private fun ColorScheme.surfaceColorAtElevation(elevation: Dp): Color {
     val base = this.surface
     if (elevation <= 0.dp) return base
 

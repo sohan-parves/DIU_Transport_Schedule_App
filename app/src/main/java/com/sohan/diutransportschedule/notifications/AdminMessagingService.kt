@@ -1,7 +1,4 @@
-
-
-package com.sohan.diutransportschedule.sync
-import java.util.UUID
+package com.sohan.diutransportschedule.notifications
 
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessaging
@@ -23,9 +20,8 @@ import androidx.core.content.ContextCompat
 import android.Manifest
 import android.content.pm.PackageManager
 import com.sohan.diutransportschedule.MainActivity
-import com.sohan.diutransportschedule.playAppAlertForNonScheduleNotification
-import com.sohan.diutransportschedule.ui.cacheNoticeFromPush
-import com.sohan.diutransportschedule.ui.registerNoticePushForHomePopup
+import com.sohan.diutransportschedule.ui.notice.cacheNoticeFromPush
+import com.sohan.diutransportschedule.ui.notice.registerNoticePushForHomePopup
 
 const val ACTION_NEW_NOTICE = "com.sohan.diutransportschedule.ACTION_NEW_NOTICE"
 
@@ -146,7 +142,7 @@ class AdminMessagingService : FirebaseMessagingService() {
                 )
                 try {
                     val noticeIntent = Intent(ACTION_NEW_NOTICE).apply {
-                        `package` = applicationContext.packageName
+                        Intent.setPackage = applicationContext.packageName
                         putExtra("id", id)
                         putExtra("title", title)
                         putExtra("body", body)
@@ -172,7 +168,7 @@ class AdminMessagingService : FirebaseMessagingService() {
             try {
                 val id = (title.trim() + "|" + body.trim() + "|" + nowMs).hashCode().toString()
                 applicationContext
-                    .getSharedPreferences(PREF_ADMIN_MESSAGE, Context.MODE_PRIVATE)
+                    .getSharedPreferences(PREF_ADMIN_MESSAGE, MODE_PRIVATE)
                     .edit()
                     .putString(KEY_ADMIN_MESSAGE_ID, id)
                     .putString(KEY_ADMIN_MESSAGE_TITLE, title)
@@ -183,7 +179,7 @@ class AdminMessagingService : FirebaseMessagingService() {
             }
             try {
                 val msgIntent = Intent(ACTION_NEW_ADMIN_MESSAGE).apply {
-                    `package` = applicationContext.packageName
+                    Intent.setPackage = applicationContext.packageName
                     putExtra("title", title)
                     putExtra("body", body)
                 }
@@ -295,13 +291,13 @@ class AdminMessagingService : FirebaseMessagingService() {
     ) {
         val appContext = context.applicationContext
 
-        val notifPrefs = appContext.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
+        val notifPrefs = appContext.getSharedPreferences("notice_alert_prefs", MODE_PRIVATE)
         val vibrationEnabled = notifPrefs.getBoolean("master_notifications_enabled", true) &&
             notifPrefs.getBoolean("alarm_vibrate_5m", true)
 
         // Android 8+ channel
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val nm = appContext.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
 
             val existing = nm.getNotificationChannel(ADMIN_MSG_CHANNEL_ID)
 

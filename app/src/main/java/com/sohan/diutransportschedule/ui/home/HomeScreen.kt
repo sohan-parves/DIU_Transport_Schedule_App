@@ -1,4 +1,4 @@
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.ui.home
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -85,7 +85,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import java.time.Instant
 import java.time.ZoneId
-import java.time.LocalDateTime
 // Removed WindowInsets, asPaddingValues, calculateTopPadding (not supported in this Compose version)
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
@@ -109,10 +108,8 @@ import androidx.compose.ui.draw.blur
 import android.content.Intent
 import android.content.BroadcastReceiver
 import androidx.core.content.ContextCompat
-import com.sohan.diutransportschedule.MainActivity
-import com.sohan.diutransportschedule.ui.checkAndSyncNoticesFromMeta
 import android.content.IntentFilter
-import com.sohan.diutransportschedule.sync.ACTION_NEW_NOTICE
+import com.sohan.diutransportschedule.notifications.ACTION_NEW_NOTICE
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
 import android.Manifest
@@ -122,12 +119,26 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.geometry.Offset
 import android.util.Log
+import androidx.compose.foundation.isSystemInDarkTheme
 import com.google.firebase.messaging.FirebaseMessaging
+import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.notifications.AdminMessagingService
+import com.sohan.diutransportschedule.ui.notice.KEY_LAST_MANUAL_NOTICE_REFRESH_MS
+import com.sohan.diutransportschedule.ui.notice.KEY_LAST_PUSH_NOTICE_ID
+import com.sohan.diutransportschedule.ui.notice.PREF_NOTICES
+import com.sohan.diutransportschedule.ui.notice.PREF_NOTICE_HOME_POPUP
+import com.sohan.diutransportschedule.ui.notice.checkAndSyncNoticesFromMeta
+import com.sohan.diutransportschedule.ui.notice.markNoticeHomePopupShown
+import com.sohan.diutransportschedule.ui.notice.readCachedNotices
+import com.sohan.diutransportschedule.ui.notice.readPendingNoticeHomePopup
 import java.util.Date
+import com.sohan.diutransportschedule.ui.theme.*
+import org.json.JSONArray
+import java.text.SimpleDateFormat
+import java.time.Duration
 
 // --- Notice notification channels ---
 private const val NOTICE_CHANNEL_ID = "admin_notices_v2"
@@ -140,9 +151,33 @@ private const val KEY_ADMIN_MESSAGE_TITLE = "title"
 private const val KEY_ADMIN_MESSAGE_BODY = "body"
 private const val KEY_ADMIN_MESSAGE_TS = "ts"
 private const val KEY_ADMIN_MESSAGE_LAST_SHOWN_ID = "last_shown_id"
+private const val KEY_ADMIN_MESSAGE_LAST_CONSUMED_UNIQUE = "last_consumed_unique"
 
 private const val PREF_ADMIN_MESSAGE_FIRESTORE_GATE = "admin_message_firestore_gate"
 private const val KEY_ADMIN_MESSAGE_LAST_SHOWN_DOC_ID = "last_shown_doc_id"
+
+private fun consumeAdminMessagePopupOnce(context: Context, uniqueKey: String): Boolean {
+    if (uniqueKey.isBlank()) return false
+    val prefs = context.getSharedPreferences(PREF_ADMIN_MESSAGE_POPUP, Context.MODE_PRIVATE)
+    val lastConsumed = prefs.getString(KEY_ADMIN_MESSAGE_LAST_CONSUMED_UNIQUE, "").orEmpty()
+    if (lastConsumed == uniqueKey) return false
+    prefs.edit().putString(KEY_ADMIN_MESSAGE_LAST_CONSUMED_UNIQUE, uniqueKey).apply()
+    return true
+}
+
+private fun buildAdminMessageUniqueKey(
+    id: String = "",
+    title: String,
+    body: String,
+    ts: Long = 0L,
+    source: String
+): String {
+    return when {
+        id.isNotBlank() -> "$source:id:$id"
+        ts > 0L -> "$source:ts:$ts:${title.hashCode()}:${body.hashCode()}"
+        else -> "$source:${title.hashCode()}:${body.hashCode()}"
+    }
+}
 
 
 
@@ -221,14 +256,23 @@ fun HomeScreen(
                 val body = prefs.getString(KEY_ADMIN_MESSAGE_BODY, "").orEmpty()
                 val ts = prefs.getLong(KEY_ADMIN_MESSAGE_TS, 0L)
                 if (body.isNotBlank()) {
-                    updatePopupTitle = title
-                    updatePopupBody = body
-                    updatePopupDateTime = if (ts > 0L) {
-                        java.text.SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(Date(ts))
-                    } else {
-                        java.text.SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(Date())
+                    val uniqueKey = buildAdminMessageUniqueKey(
+                        id = id,
+                        title = title,
+                        body = body,
+                        ts = ts,
+                        source = "push_prefs"
+                    )
+                    if (consumeAdminMessagePopupOnce(ctx, uniqueKey)) {
+                        updatePopupTitle = title
+                        updatePopupBody = body
+                        updatePopupDateTime = if (ts > 0L) {
+                            SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(Date(ts))
+                        } else {
+                            SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(Date())
+                        }
+                        showUpdateOverlay = true
                     }
-                    showUpdateOverlay = true
                     prefs.edit().putString(KEY_ADMIN_MESSAGE_LAST_SHOWN_ID, id).apply()
                 }
             }
@@ -288,13 +332,23 @@ fun HomeScreen(
 
             val ts = doc.getTimestamp("createdAt")?.toDate()?.time ?: System.currentTimeMillis()
 
-            updatePopupTitle = t
-            updatePopupBody = b
-            updatePopupDateTime = java.text.SimpleDateFormat(
-                "dd MMM yyyy • hh:mm a",
-                Locale.ENGLISH
-            ).format(java.util.Date(ts))
-            showUpdateOverlay = true
+            val uniqueKey = buildAdminMessageUniqueKey(
+                id = docId,
+                title = t,
+                body = b,
+                ts = ts,
+                source = "firestore"
+            )
+
+            if (consumeAdminMessagePopupOnce(ctx, uniqueKey)) {
+                updatePopupTitle = t
+                updatePopupBody = b
+                updatePopupDateTime = SimpleDateFormat(
+                    "dd MMM yyyy • hh:mm a",
+                    Locale.ENGLISH
+                ).format(Date(ts))
+                showUpdateOverlay = true
+            }
 
             gate.edit().putString(KEY_ADMIN_MESSAGE_LAST_SHOWN_DOC_ID, docId).apply()
         } catch (_: Throwable) {
@@ -323,7 +377,7 @@ fun HomeScreen(
 
                 val ts = latestDoc?.getTimestamp("createdAt")
                 ts?.toDate()?.let {
-                    java.text.SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(it)
+                    SimpleDateFormat("dd MMM yyyy • hh:mm a", Locale.ENGLISH).format(it)
                 }.orEmpty()
             } catch (_: Throwable) {
                 updatePopupTitle = fallbackTitle
@@ -335,7 +389,17 @@ fun HomeScreen(
             if (updatePopupBody.isBlank()) updatePopupBody = fallbackBody
 
             updatePopupDateTime = createdAtText
-            showUpdateOverlay = true
+
+            val uniqueKey = buildAdminMessageUniqueKey(
+                id = "",
+                title = updatePopupTitle.ifBlank { fallbackTitle },
+                body = updatePopupBody.ifBlank { fallbackBody },
+                ts = 0L,
+                source = "vm_update"
+            )
+            if (consumeAdminMessagePopupOnce(ctx, uniqueKey)) {
+                showUpdateOverlay = true
+            }
         }
     }
 
@@ -420,7 +484,12 @@ fun HomeScreen(
                                     Instant.ofEpochMilli(ms)
                                         .atZone(ZoneId.systemDefault())
                                         .toLocalDate()
-                                        .format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ENGLISH))
+                                        .format(
+                                            DateTimeFormatter.ofPattern(
+                                                "d MMM yyyy",
+                                                Locale.ENGLISH
+                                            )
+                                        )
                                 } catch (_: Throwable) {
                                     ""
                                 }
@@ -486,17 +555,28 @@ fun HomeScreen(
 
         val adminMessageReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action != com.sohan.diutransportschedule.sync.AdminMessagingService.ACTION_NEW_ADMIN_MESSAGE) return
+                if (intent?.action != AdminMessagingService.ACTION_NEW_ADMIN_MESSAGE) return
                 val titleExtra = intent.getStringExtra("title").orEmpty().ifBlank { "Update" }
                 val bodyExtra = intent.getStringExtra("body").orEmpty()
+                val idExtra = intent.getStringExtra("id").orEmpty()
+                val tsExtra = intent.getLongExtra("ts", 0L)
                 if (bodyExtra.isBlank()) return
                 Handler(Looper.getMainLooper()).post {
+                    val uniqueKey = buildAdminMessageUniqueKey(
+                        id = idExtra,
+                        title = titleExtra,
+                        body = bodyExtra,
+                        ts = tsExtra,
+                        source = "broadcast"
+                    )
+                    if (!consumeAdminMessagePopupOnce(ctx, uniqueKey)) return@post
+
                     updatePopupTitle = titleExtra
                     updatePopupBody = bodyExtra
-                    updatePopupDateTime = java.text.SimpleDateFormat(
+                    updatePopupDateTime = SimpleDateFormat(
                         "dd MMM yyyy • hh:mm a",
                         Locale.ENGLISH
-                    ).format(java.util.Date())
+                    ).format(Date(if (tsExtra > 0L) tsExtra else System.currentTimeMillis()))
                     showUpdateOverlay = true
                     vm.showInlineUpdateFromPush(titleExtra, bodyExtra)
                 }
@@ -504,7 +584,7 @@ fun HomeScreen(
         }
 
         val noticeFilter = IntentFilter(ACTION_NEW_NOTICE)
-        val adminFilter = IntentFilter(com.sohan.diutransportschedule.sync.AdminMessagingService.ACTION_NEW_ADMIN_MESSAGE)
+        val adminFilter = IntentFilter(AdminMessagingService.ACTION_NEW_ADMIN_MESSAGE)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ctx.registerReceiver(noticeReceiver, noticeFilter, Context.RECEIVER_NOT_EXPORTED)
@@ -770,7 +850,7 @@ private fun FacebookHeaderSkeleton(appDark: Boolean) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(28.dp))
-            .background(if (appDark) Color(0xFF111827) else Color.White)
+            .background(if (appDark) Color(0xFF111827) else SkeletonCardLight)
             .padding(horizontal = 18.dp, vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
@@ -851,7 +931,7 @@ private fun FacebookCommentSkeletonCard(
     compact: Boolean = false
 ) {
     val shimmer = rememberSkeletonBrush(appDark = appDark)
-    val cardColor = if (appDark) Color(0xFF111827) else Color.White
+    val cardColor = if (appDark) Color(0xFF111827) else SkeletonCardLight
 
     Row(
         modifier = Modifier
@@ -1338,8 +1418,7 @@ private fun FullUpdateOverlay(
     val accent = if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
 
     // Slightly stronger scrim so text remains readable
-    val scrim = if (dark) Color.Black.copy(alpha = 0.55f) else Color.Black.copy(alpha = 0.35f)
-
+    val scrim = if (dark) OverlayScrimDark else OverlayScrimLight
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1456,8 +1535,8 @@ private fun PremiumAccordionScheduleCard(
     val dark = appDark
     val cardColor = if (dark) surfaceAtElevationCompat(isDark = true, elevation = 2f) else MaterialTheme.colorScheme.surface
     val cardBorder = if (dark) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
-    val lightText = Color.Black
-    val lightSubText = Color.Black
+    val lightText = MaterialTheme.colorScheme.onSurface
+    val lightSubText = MaterialTheme.colorScheme.onSurfaceVariant
     val actionGreen = Color(0xFF00C853) // green for dark mode action
 
     val key = remember(item) { item.stableId() }
@@ -1630,7 +1709,7 @@ private fun PremiumAccordionScheduleCard(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(999.dp))
-                                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.90f))
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -1982,7 +2061,7 @@ private fun TimeChipsRow(times: List<String>, multiline: Boolean, appDark: Boole
                 if (parsed == null) null
                 else {
                     val seconds = try {
-                        java.time.Duration.between(now, parsed).seconds
+                        Duration.between(now, parsed).seconds
                     } catch (_: Throwable) {
                         0L
                     }
@@ -2001,7 +2080,7 @@ private fun TimeChipsRow(times: List<String>, multiline: Boolean, appDark: Boole
             val baseContainer = if (appDark) {
                 MaterialTheme.colorScheme.secondary.copy(alpha = 0.22f)
             } else {
-                MaterialTheme.colorScheme.secondaryContainer
+                TimeChipLight
             }
 
             val container = if (expired) baseContainer.copy(alpha = baseContainer.alpha * 0.45f) else baseContainer
@@ -2009,13 +2088,13 @@ private fun TimeChipsRow(times: List<String>, multiline: Boolean, appDark: Boole
                 (if (appDark)
                     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)
                 else
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                    TimeChipBorderLight
                 ).copy(alpha = 0.22f)
             } else {
                 if (appDark)
                     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)
                 else
-                    MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+                    TimeChipBorderLight
             }
 
             AssistChip(
@@ -2139,10 +2218,10 @@ private fun TimePill(text: String, appDark: Boolean) {
 
 private fun hasPostNotificationsPermission(context: Context): Boolean {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        androidx.core.content.ContextCompat.checkSelfPermission(
+        ContextCompat.checkSelfPermission(
             context,
-            android.Manifest.permission.POST_NOTIFICATIONS
-        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
     } else {
         true
     }
@@ -2193,9 +2272,9 @@ private fun parseLocalTimeOrNull(raw: String): LocalTime? {
     return try {
         val hasSeconds = token.contains(":") && token.count { it == ':' } == 2
         val fmt = if (hasSeconds) {
-            java.time.format.DateTimeFormatter.ofPattern("h:mm:ss a", Locale.ENGLISH)
+            DateTimeFormatter.ofPattern("h:mm:ss a", Locale.ENGLISH)
         } else {
-            java.time.format.DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH)
+            DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH)
         }
         LocalTime.parse(token, fmt)
     } catch (_: Throwable) {
@@ -2458,7 +2537,7 @@ private fun NoticePopupWatcher() {
             if (key != "json") return@OnSharedPreferenceChangeListener
             try {
                 val raw = prefs.getString("json", "[]") ?: "[]"
-                val arr = org.json.JSONArray(raw)
+                val arr = JSONArray(raw)
                 if (arr.length() == 0) return@OnSharedPreferenceChangeListener
 
                 val o = arr.getJSONObject(0)
@@ -2476,7 +2555,7 @@ private fun NoticePopupWatcher() {
     }
 
     if (show) {
-        val dark = androidx.compose.foundation.isSystemInDarkTheme()
+        val dark = isSystemInDarkTheme()
         val btnColor = if (dark) Color.White else Color.Black
 
         val preview = remember(body) {
@@ -2527,8 +2606,8 @@ private fun NoticePopupWatcher() {
                 TextButton(
                     onClick = {
                         show = false
-                        val i = Intent(ctx, com.sohan.diutransportschedule.MainActivity::class.java).apply {
-                            putExtra(com.sohan.diutransportschedule.MainActivity.EXTRA_OPEN_NOTICE, true)
+                        val i = Intent(ctx, MainActivity::class.java).apply {
+                            putExtra(MainActivity.EXTRA_OPEN_NOTICE, true)
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                         }
                         ctx.startActivity(i)

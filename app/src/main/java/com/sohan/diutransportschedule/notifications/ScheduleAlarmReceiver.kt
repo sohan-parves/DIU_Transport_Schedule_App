@@ -1,4 +1,4 @@
-package com.sohan.diutransportschedule
+package com.sohan.diutransportschedule.notifications
 
 import android.media.Ringtone
 import android.media.MediaPlayer
@@ -10,19 +10,18 @@ import android.os.VibratorManager
 import android.os.VibrationAttributes
 
 import android.app.AlarmManager
-import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.provider.Settings
-import android.Manifest
+import android.R
 import java.util.Locale
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
@@ -41,18 +40,21 @@ import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
 import android.database.ContentObserver
 import android.media.AudioManager
+import androidx.core.graphics.drawable.IconCompat
+import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.ensureNotificationChannel
 
-private const val ACTION_STOP_RUNNING_ALERT_INTERNAL = "com.sohan.diutransportschedule.ACTION_STOP_RUNNING_ALERT_INTERNAL"
-private const val ACTION_TAP_OPEN_AND_STOP = "com.sohan.diutransportschedule.ACTION_TAP_OPEN_AND_STOP"
-private const val ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT = "com.sohan.diutransportschedule.ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT"
-private const val ACTION_SCREEN_OFF_STOP_ALERT = "com.sohan.diutransportschedule.ACTION_SCREEN_OFF_STOP_ALERT"
+private const val ACTION_STOP_RUNNING_ALERT_INTERNAL = "com.sohan.diutransportschedule.notifications.ACTION_STOP_RUNNING_ALERT_INTERNAL"
+private const val ACTION_TAP_OPEN_AND_STOP = "com.sohan.diutransportschedule.notifications.ACTION_TAP_OPEN_AND_STOP"
+private const val ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT = "com.sohan.diutransportschedule.notifications.ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT"
+private const val ACTION_SCREEN_OFF_STOP_ALERT = "com.sohan.diutransportschedule.notifications.ACTION_SCREEN_OFF_STOP_ALERT"
 private const val ALERT_STOP_REQ_CODE = 9077
 private const val ALERT_AUTO_OPEN_REQ_CODE = 9078
 
-const val EXTRA_AT_MS = "com.sohan.diutransportschedule.EXTRA_AT_MS"
-const val EXTRA_EXPLICIT_MIDNIGHT = "com.sohan.diutransportschedule.EXTRA_EXPLICIT_MIDNIGHT"
-const val EXTRA_ALARM_FINGERPRINT = "com.sohan.diutransportschedule.EXTRA_ALARM_FINGERPRINT"
-const val EXTRA_SOURCE_TOKEN = "com.sohan.diutransportschedule.EXTRA_SOURCE_TOKEN"
+const val EXTRA_AT_MS = "com.sohan.diutransportschedule.notifications.EXTRA_AT_MS"
+const val EXTRA_EXPLICIT_MIDNIGHT = "com.sohan.diutransportschedule.notifications.EXTRA_EXPLICIT_MIDNIGHT"
+const val EXTRA_ALARM_FINGERPRINT = "com.sohan.diutransportschedule.notifications.EXTRA_ALARM_FINGERPRINT"
+const val EXTRA_SOURCE_TOKEN = "com.sohan.diutransportschedule.notifications.EXTRA_SOURCE_TOKEN"
 private const val DEDUPE_PREFS = "alarm_dedupe_prefs"
 private const val KEY_LAST_AT_MS = "last_at_ms"
 private const val KEY_LAST_WALL_MS = "last_wall_ms"
@@ -172,7 +174,7 @@ fun resetAlarmStateForNotifyTimeChange(context: Context) {
         val alarmIntent = Intent(context, ScheduleAlarmReceiver::class.java)
         val alarmPi = PendingIntent.getBroadcast(
             context,
-            MainActivity.ALARM_REQ_CODE,
+            ALARM_REQ_CODE,
             alarmIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or
                     (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
@@ -184,15 +186,15 @@ fun resetAlarmStateForNotifyTimeChange(context: Context) {
     }
 
     try {
-        NotificationManagerCompat.from(context).cancel(MainActivity.ALARM_REQ_CODE)
+        NotificationManagerCompat.from(context).cancel(ALARM_REQ_CODE)
     } catch (_: Throwable) {
     }
 
     try {
         context.getSharedPreferences(
-            MainActivity.PREF_SCHEDULE_QUEUE,
+            MainActivity.Companion.PREF_SCHEDULE_QUEUE,
             Context.MODE_PRIVATE
-        ).edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, "").apply()
+        ).edit().putString(MainActivity.Companion.KEY_SCHEDULE_QUEUE, "").apply()
     } catch (_: Throwable) {
     }
 }
@@ -235,7 +237,7 @@ object RunningAlertController {
                     // Any power-button interaction that turns the screen OFF / ON,
                     // or unlocks the device, should stop only the running alert.
                     // Keep the notification visible for manual dismissal.
-                    RunningAlertController.stop(context.applicationContext)
+                    stop(context.applicationContext)
                 } catch (_: Throwable) {
                 }
             }
@@ -294,7 +296,7 @@ object RunningAlertController {
                     try {
                         // Any volume-button interaction should stop only the running alert.
                         // Keep the notification visible so the user can dismiss it manually.
-                        RunningAlertController.stop(context.applicationContext)
+                        stop(context.applicationContext)
                     } catch (_: Throwable) {
                     }
                 }
@@ -315,7 +317,7 @@ object RunningAlertController {
                     if (!isAlertRunning) return
                     try {
                         if (hasAnyTrackedVolumeChanged(context.applicationContext)) {
-                            RunningAlertController.stop(context.applicationContext)
+                            stop(context.applicationContext)
                             return
                         }
                         captureCurrentVolumes(context.applicationContext)
@@ -423,8 +425,8 @@ object RunningAlertController {
             val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
 
             val stopIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-                action = ACTION_STOP_RUNNING_ALERT_INTERNAL
-                data = Uri.parse("diu://stop_running_alert")
+                Intent.setAction = ACTION_STOP_RUNNING_ALERT_INTERNAL
+                Intent.setData = Uri.parse("diu://stop_running_alert")
             }
             val stopPi = PendingIntent.getBroadcast(
                 context,
@@ -439,8 +441,8 @@ object RunningAlertController {
             }
 
             val autoOpenIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-                action = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
-                data = Uri.parse("diu://auto_open_after_timeout")
+                Intent.setAction = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
+                Intent.setData = Uri.parse("diu://auto_open_after_timeout")
             }
             val autoOpenPi = PendingIntent.getBroadcast(
                 context,
@@ -511,7 +513,7 @@ object RunningAlertController {
         currentSessionId = newSessionId
         try {
             if (!screenOffReceiverRegistered) {
-                val filter = android.content.IntentFilter().apply {
+                val filter = IntentFilter().apply {
                     addAction(Intent.ACTION_SCREEN_OFF)
                     addAction(Intent.ACTION_SCREEN_ON)
                     addAction(Intent.ACTION_USER_PRESENT)
@@ -674,8 +676,8 @@ object RunningAlertController {
             val timeoutAt = System.currentTimeMillis() + overallDurationMs
 
             val timeoutIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-                action = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
-                data = Uri.parse("diu://auto_open_after_timeout")
+                Intent.setAction = ACTION_AUTO_OPEN_APP_AFTER_TIMEOUT
+                Intent.setData = Uri.parse("diu://auto_open_after_timeout")
             }
             val timeoutPi = PendingIntent.getBroadcast(
                 context,
@@ -914,10 +916,30 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         }
 
         // ✅ ensure all 4 channels exist
-        ensureNotificationChannel(context, NOTIF_CHANNEL_ID_SOUND_VIB, MainActivity.NOTIF_CHANNEL_NAME, MainActivity.NOTIF_CHANNEL_DESC)
-        ensureNotificationChannel(context, NOTIF_CHANNEL_ID_SOUND_ONLY, MainActivity.NOTIF_CHANNEL_NAME, MainActivity.NOTIF_CHANNEL_DESC)
-        ensureNotificationChannel(context, NOTIF_CHANNEL_ID_VIB_ONLY, MainActivity.NOTIF_CHANNEL_NAME, MainActivity.NOTIF_CHANNEL_DESC)
-        ensureNotificationChannel(context, NOTIF_CHANNEL_ID_SILENT,    MainActivity.NOTIF_CHANNEL_NAME, MainActivity.NOTIF_CHANNEL_DESC)
+        ensureNotificationChannel(
+            context,
+            NOTIF_CHANNEL_ID_SOUND_VIB,
+            MainActivity.Companion.NOTIF_CHANNEL_NAME,
+            MainActivity.Companion.NOTIF_CHANNEL_DESC
+        )
+        ensureNotificationChannel(
+            context,
+            NOTIF_CHANNEL_ID_SOUND_ONLY,
+            MainActivity.Companion.NOTIF_CHANNEL_NAME,
+            MainActivity.Companion.NOTIF_CHANNEL_DESC
+        )
+        ensureNotificationChannel(
+            context,
+            NOTIF_CHANNEL_ID_VIB_ONLY,
+            MainActivity.Companion.NOTIF_CHANNEL_NAME,
+            MainActivity.Companion.NOTIF_CHANNEL_DESC
+        )
+        ensureNotificationChannel(
+            context,
+            NOTIF_CHANNEL_ID_SILENT,
+            MainActivity.Companion.NOTIF_CHANNEL_NAME,
+            MainActivity.Companion.NOTIF_CHANNEL_DESC
+        )
 
         // 1) Title line: "DIU Bus Reminder • {RoadNo}"
         val routeLabel = rawTitle.substringAfter('•', missingDelimiterValue = "").trim()
@@ -994,7 +1016,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
             ?.apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 putExtra("stop_current_alarm", true)
-                data = Uri.parse("diu://tap_open_and_stop/${System.currentTimeMillis()}")
+                Intent.setData = Uri.parse("diu://tap_open_and_stop/${System.currentTimeMillis()}")
             }
 
         val contentPi = PendingIntent.getActivity(
@@ -1009,7 +1031,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         // Stop action
         val stopIntent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
             setAction(ACTION_STOP_SCHEDULE_ALARM)
-            data = Uri.parse("diu://stop_schedule_alarm")
+            Intent.setData = Uri.parse("diu://stop_schedule_alarm")
         }
         val stopPi = PendingIntent.getBroadcast(
             context,
@@ -1019,8 +1041,8 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
                     (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
-        val iconBitmap = BitmapFactory.decodeResource(context.resources, android.R.drawable.ic_media_pause)
-        val icon = androidx.core.graphics.drawable.IconCompat.createWithBitmap(iconBitmap)
+        val iconBitmap = BitmapFactory.decodeResource(context.resources, R.drawable.ic_media_pause)
+        val icon = IconCompat.createWithBitmap(iconBitmap)
 
         val stopAction = NotificationCompat.Action.Builder(
             icon,
@@ -1029,7 +1051,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         ).build()
 
         // ✅ Left side: DIU logo (large icon)
-        val largeLogo = BitmapFactory.decodeResource(context.resources, R.drawable.diu_logo)
+        val largeLogo = BitmapFactory.decodeResource(context.resources, com.sohan.diutransportschedule.R.drawable.diu_logo)
 
         // Fixed color so system dark mode cannot change notification appearance
         val COLOR_DEEP_BLUE = 0xFF0B3D91.toInt()
@@ -1037,7 +1059,7 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         val builder = NotificationCompat.Builder(context, channelId)
             // ✅ Right side logo remove: small icon generic (MIUI header এ DIU logo দেখাবে না)
-            .setSmallIcon(android.R.drawable.screen_background_dark_transparent)
+            .setSmallIcon(R.drawable.screen_background_dark_transparent)
             .setColorized(true)
             .setColor(COLOR_DEEP_BLUE)   // deep blue base
             // Collapsed view
@@ -1155,8 +1177,8 @@ private fun parseQueue(raw: String): List<QueueItem> {
 }
 
 private fun scheduleNextFromStoredQueue(context: Context) {
-    val prefs = context.getSharedPreferences(MainActivity.PREF_SCHEDULE_QUEUE, Context.MODE_PRIVATE)
-    val raw = prefs.getString(MainActivity.KEY_SCHEDULE_QUEUE, "").orEmpty()
+    val prefs = context.getSharedPreferences(MainActivity.Companion.PREF_SCHEDULE_QUEUE, Context.MODE_PRIVATE)
+    val raw = prefs.getString(MainActivity.Companion.KEY_SCHEDULE_QUEUE, "").orEmpty()
 
     val nowMs = System.currentTimeMillis()
     val selectedRouteGuard = context
@@ -1169,7 +1191,7 @@ private fun scheduleNextFromStoredQueue(context: Context) {
     val nextAlarmIntent = Intent(context, ScheduleAlarmReceiver::class.java)
     val nextAlarmPi = PendingIntent.getBroadcast(
         context,
-        MainActivity.ALARM_REQ_CODE,
+        ALARM_REQ_CODE,
         nextAlarmIntent,
         PendingIntent.FLAG_UPDATE_CURRENT or
             (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
@@ -1216,7 +1238,7 @@ private fun scheduleNextFromStoredQueue(context: Context) {
             it.displayTime.replace("|", " ")
         ).joinToString("|")
     }
-    prefs.edit().putString(MainActivity.KEY_SCHEDULE_QUEUE, newRaw).apply()
+    prefs.edit().putString(MainActivity.Companion.KEY_SCHEDULE_QUEUE, newRaw).apply()
 
     val next = remaining.firstOrNull() ?: run {
         try {
@@ -1239,8 +1261,8 @@ private fun scheduleNextFromStoredQueue(context: Context) {
     }
 
     val intent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
-        putExtra(MainActivity.EXTRA_TITLE, next.title)
-        putExtra(MainActivity.EXTRA_TEXT, next.text)
+        putExtra(EXTRA_TITLE, next.title)
+        putExtra(EXTRA_TEXT, next.text)
         putExtra(EXTRA_AT_MS, next.atMs)
         putExtra(EXTRA_EXPLICIT_MIDNIGHT, next.explicitMidnight)
         putExtra(EXTRA_ALARM_FINGERPRINT, next.fingerprint)
@@ -1250,7 +1272,7 @@ private fun scheduleNextFromStoredQueue(context: Context) {
 
     val pi = PendingIntent.getBroadcast(
         context,
-        MainActivity.ALARM_REQ_CODE,
+        ALARM_REQ_CODE,
         intent,
         PendingIntent.FLAG_UPDATE_CURRENT or
             (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)

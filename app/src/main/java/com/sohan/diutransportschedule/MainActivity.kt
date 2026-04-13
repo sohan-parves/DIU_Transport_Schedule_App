@@ -2,8 +2,6 @@ package com.sohan.diutransportschedule
 
 
 import android.Manifest
-import android.media.AudioAttributes
-import android.media.RingtoneManager
 import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -31,10 +29,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -48,21 +42,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.material.icons.Icons
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -70,19 +58,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.sohan.diutransportschedule.ui.HomeViewModel
-import com.sohan.diutransportschedule.ui.MainNav
+import com.sohan.diutransportschedule.ui.home.HomeViewModel
+import com.sohan.diutransportschedule.ui.navigation.MainNav
 import com.sohan.diutransportschedule.ui.theme.DIUTransportScheduleTheme
-import com.sohan.diutransportschedule.ui.checkAndSyncNoticesFromMeta
+import com.sohan.diutransportschedule.ui.notice.checkAndSyncNoticesFromMeta
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Done
-import com.sohan.diutransportschedule.App
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import android.content.BroadcastReceiver
-import androidx.appcompat.app.AppCompatDelegate
 import android.content.pm.PackageManager
 import android.util.Log
 import java.time.LocalDate
@@ -96,14 +78,12 @@ import android.app.Notification
 import androidx.core.view.WindowCompat
 import android.graphics.Color
 import androidx.core.view.WindowInsetsControllerCompat
-import android.view.KeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color as ComposeColor
 import android.view.Window
 import com.google.firebase.firestore.FirebaseFirestore
-import com.sohan.diutransportschedule.BuildConfig
 import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
 import com.sohan.diutransportschedule.appfeature.AppUpdateFeatureGuideContent
 import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
@@ -112,7 +92,7 @@ import com.sohan.diutransportschedule.appfeature.markUpdateGuideShown
 import com.sohan.diutransportschedule.appfeature.markWelcomeGuideShown
 import com.sohan.diutransportschedule.appfeature.shouldShowUpdateGuide
 import com.sohan.diutransportschedule.appfeature.shouldShowWelcomeGuide
-import com.sohan.diutransportschedule.sync.tryIngestNoticeFromFcmLaunchIntent
+import com.sohan.diutransportschedule.notifications.tryIngestNoticeFromFcmLaunchIntent
 import android.app.Activity
 import com.google.android.play.core.appupdate.AppUpdateManagerFactory
 import com.google.android.play.core.appupdate.AppUpdateOptions
@@ -121,8 +101,6 @@ import com.google.android.play.core.install.model.UpdateAvailability
 import kotlinx.coroutines.tasks.await
 import android.app.AlertDialog
 import android.widget.TextView
-import androidx.compose.runtime.*
-import androidx.compose.material3.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -133,6 +111,12 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import com.sohan.diutransportschedule.notifications.EXTRA_ALARM_FINGERPRINT
+import com.sohan.diutransportschedule.notifications.EXTRA_AT_MS
+import com.sohan.diutransportschedule.notifications.EXTRA_EXPLICIT_MIDNIGHT
+import com.sohan.diutransportschedule.notifications.EXTRA_SOURCE_TOKEN
+import com.sohan.diutransportschedule.notifications.RunningAlertController
+import com.sohan.diutransportschedule.notifications.ScheduleAlarmReceiver
 
 
 // ==============================
@@ -1916,10 +1900,10 @@ private fun scheduleNextAlarmFromData(
     val intent = Intent(context, ScheduleAlarmReceiver::class.java).apply {
         putExtra(MainActivity.EXTRA_TITLE, firstTitle)
         putExtra(MainActivity.EXTRA_TEXT, firstText)
-        putExtra(com.sohan.diutransportschedule.EXTRA_AT_MS, firstMs)
-        putExtra(com.sohan.diutransportschedule.EXTRA_EXPLICIT_MIDNIGHT, first.explicitMidnight)
-        putExtra(com.sohan.diutransportschedule.EXTRA_ALARM_FINGERPRINT, first.fingerprint)
-        putExtra(com.sohan.diutransportschedule.EXTRA_SOURCE_TOKEN, first.sourceToken)
+        putExtra(EXTRA_AT_MS, firstMs)
+        putExtra(EXTRA_EXPLICIT_MIDNIGHT, first.explicitMidnight)
+        putExtra(EXTRA_ALARM_FINGERPRINT, first.fingerprint)
+        putExtra(EXTRA_SOURCE_TOKEN, first.sourceToken)
     }
 
     val pi = PendingIntent.getBroadcast(

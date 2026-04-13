@@ -1,10 +1,11 @@
-package com.sohan.diutransportschedule.sync
+package com.sohan.diutransportschedule.data.repository
 
 import com.google.firebase.firestore.FirebaseFirestore
 import com.sohan.diutransportschedule.db.DbScheduleItem
 import com.sohan.diutransportschedule.db.JsonConverters
 import com.sohan.diutransportschedule.db.ScheduleDao
 import com.sohan.diutransportschedule.prefs.UserPrefs
+import com.sohan.diutransportschedule.sync.VersionStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.tasks.await

@@ -1,4 +1,4 @@
-package com.sohan.diutransportschedule.ui
+package com.sohan.diutransportschedule.ui.components
 
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
@@ -20,15 +20,9 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 // import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.foundation.border
-import androidx.compose.ui.draw.shadow
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -43,6 +37,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import kotlin.math.abs
 
 
 @Composable
@@ -66,7 +61,7 @@ fun DotsLoadingIndicator(
     fun phase(offset: Float): Float {
         val x = (t + offset) % 1f
         // triangle wave 0..1..0
-        return 1f - kotlin.math.abs(2f * x - 1f)
+        return 1f - abs(2f * x - 1f)
     }
 
     val a1 = 0.35f + 0.65f * phase(0.0f)

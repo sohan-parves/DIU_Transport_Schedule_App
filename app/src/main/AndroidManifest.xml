@@ -43,10 +43,10 @@
         </activity-alias>
 
         <receiver
-            android:name=".ScheduleAlarmReceiver"
+            android:name=".notifications.ScheduleAlarmReceiver"
             android:exported="false" />
         <service
-            android:name=".sync.AdminMessagingService"
+            android:name=".notifications.AdminMessagingService"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
