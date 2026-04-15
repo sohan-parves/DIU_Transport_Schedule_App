@@ -1051,15 +1051,13 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         ).build()
 
         // ✅ Left side: DIU logo (large icon)
-        val largeLogo = BitmapFactory.decodeResource(context.resources, com.sohan.diutransportschedule.R.drawable.diu_logo)
-
         // Fixed color so system dark mode cannot change notification appearance
         val COLOR_DEEP_BLUE = 0xFF0B3D91.toInt()
 
 
         val builder = NotificationCompat.Builder(context, channelId)
             // ✅ Right side logo remove: small icon generic (MIUI header এ DIU logo দেখাবে না)
-            .setSmallIcon(R.drawable.screen_background_dark_transparent)
+            .setSmallIcon(com.sohan.diutransportschedule.R.drawable.ic_fcm_status)
             .setColorized(true)
             .setColor(COLOR_DEEP_BLUE)   // deep blue base
             // Collapsed view

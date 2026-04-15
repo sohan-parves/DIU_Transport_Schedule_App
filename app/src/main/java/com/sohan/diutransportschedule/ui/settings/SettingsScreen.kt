@@ -1789,7 +1789,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             }
                                                         }
 
-                                                        else -> "Turn this ON to enable notifications and vibration together. Ringtone is controlled separately below"
+                                                        else -> "Turn this ON to enable notifications"
                                                     },
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     color = primaryText
