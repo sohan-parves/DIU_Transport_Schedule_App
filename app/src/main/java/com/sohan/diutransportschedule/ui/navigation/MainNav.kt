@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.graphicsLayer
 import com.sohan.diutransportschedule.ui.components.BottomTab
 import com.sohan.diutransportschedule.ui.home.HomeScreen
 import com.sohan.diutransportschedule.ui.home.HomeViewModel
@@ -76,11 +77,16 @@ fun MainNav(
         }
     ) { pad ->
         Box(modifier = Modifier.fillMaxSize()) {
+            val homeActive = currentRoute == "home"
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .zIndex(if (currentRoute == "home") 4f else 0f)
-                    .background(if (currentRoute == "home") MaterialTheme.colorScheme.background else Color.Transparent)
+                    .zIndex(if (homeActive) 4f else 0f)
+                    .graphicsLayer {
+                        alpha = if (homeActive) 1f else 0f
+                        translationX = if (homeActive) 0f else 100000f
+                    }
+                    .background(if (homeActive) MaterialTheme.colorScheme.background else Color.Transparent)
             ) {
                 saveableStateHolder.SaveableStateProvider("home") {
                     HomeScreen(
@@ -91,33 +97,48 @@ fun MainNav(
                 }
             }
 
+            val mapActive = currentRoute == "map"
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .zIndex(if (currentRoute == "map") 4f else 0f)
-                    .background(if (currentRoute == "map") MaterialTheme.colorScheme.background else Color.Transparent)
+                    .zIndex(if (mapActive) 4f else 0f)
+                    .graphicsLayer {
+                        alpha = if (mapActive) 1f else 0f
+                        translationX = if (mapActive) 0f else 100000f
+                    }
+                    .background(if (mapActive) MaterialTheme.colorScheme.background else Color.Transparent)
             ) {
                 saveableStateHolder.SaveableStateProvider("map") {
-                    LiveMapScreen(isTabActive = currentRoute == "map")
+                    LiveMapScreen(isTabActive = mapActive)
                 }
             }
 
+            val noticeActive = currentRoute == "notice"
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .zIndex(if (currentRoute == "notice") 4f else 0f)
-                    .background(if (currentRoute == "notice") MaterialTheme.colorScheme.background else Color.Transparent)
+                    .zIndex(if (noticeActive) 4f else 0f)
+                    .graphicsLayer {
+                        alpha = if (noticeActive) 1f else 0f
+                        translationX = if (noticeActive) 0f else 100000f
+                    }
+                    .background(if (noticeActive) MaterialTheme.colorScheme.background else Color.Transparent)
             ) {
                 saveableStateHolder.SaveableStateProvider("notice") {
                     NoticeScreen(pad = pad)
                 }
             }
 
+            val profileActive = currentRoute == "profile"
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .zIndex(if (currentRoute == "profile") 4f else 0f)
-                    .background(if (currentRoute == "profile") MaterialTheme.colorScheme.background else Color.Transparent)
+                    .zIndex(if (profileActive) 4f else 0f)
+                    .graphicsLayer {
+                        alpha = if (profileActive) 1f else 0f
+                        translationX = if (profileActive) 0f else 100000f
+                    }
+                    .background(if (profileActive) MaterialTheme.colorScheme.background else Color.Transparent)
             ) {
                 saveableStateHolder.SaveableStateProvider("profile_$profileRenderKey") {
                     ProfileScreen(vm)
