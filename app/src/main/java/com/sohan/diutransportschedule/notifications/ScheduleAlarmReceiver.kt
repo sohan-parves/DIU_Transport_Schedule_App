@@ -37,6 +37,7 @@ import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_SI
 import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_VIB_ONLY
 import android.util.Log
 import android.os.SystemClock
+import android.os.PowerManager
 import java.util.concurrent.atomic.AtomicLong
 import android.database.ContentObserver
 import android.media.AudioManager
@@ -207,6 +208,7 @@ object RunningAlertController {
     private var isAlertRunning = false
     private var lastStartElapsedMs = 0L
     private var currentSessionId = 0L
+    private var wakeLock: PowerManager.WakeLock? = null
     private var lastAlertKey = ""
     private var lastAlertKeyWallMs = 0L
     private const val START_GUARD_WINDOW_MS = 7000L
@@ -415,6 +417,17 @@ object RunningAlertController {
         isAlertRunning = false
         lastStartElapsedMs = 0L
         currentSessionId = 0L
+
+        try {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        wakeLock = null
+
         mainHandler.postDelayed({
             lastAlertKey = ""
             lastAlertKeyWallMs = 0L
@@ -471,12 +484,12 @@ object RunningAlertController {
         val nowWall = System.currentTimeMillis()
         val normalizedAlertKey = alertKey.trim()
 
-        val resolvedSoundDurationMs = soundDurationMs.coerceIn(5_000L, 5 * 60 * 1000L)
-        val resolvedVibrateDurationMs = vibrateDurationMs.coerceIn(5_000L, 5 * 60 * 1000L)
+        val resolvedSoundDurationMs = soundDurationMs.coerceIn(500L, 5 * 60 * 1000L)
+        val resolvedVibrateDurationMs = vibrateDurationMs.coerceIn(500L, 5 * 60 * 1000L)
         val overallDurationMs = maxOf(
             if (soundOn) resolvedSoundDurationMs else 0L,
             if (vibrateOn) resolvedVibrateDurationMs else 0L
-        ).coerceAtLeast(5_000L)
+        ).coerceAtLeast(500L)
 
         // Stronger guard: if the same logical alert arrives again shortly after the first one,
         // never start sound/vibration a second time.
@@ -523,6 +536,15 @@ object RunningAlertController {
             }
         } catch (_: Throwable) {
         }
+        
+        try {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DIUTransport:AlertRingingWakeLock")
+            wakeLock?.acquire(overallDurationMs + 5000L) // +5 sec padding for cleanup
+        } catch (t: Throwable) {
+            Log.e("ScheduleAlarmReceiver", "Failed to acquire wake lock", t)
+        }
+
         // 🔥 Enable instant stop via volume buttons (even on lock screen)
         registerVolumeStopObserver(context.applicationContext)
         if (soundOn) {
@@ -887,10 +909,10 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         val soundOn = masterNotificationsEnabled && prefs.getBoolean(KEY_ALARM_SOUND_5M, true)
         val vibrateOn = masterNotificationsEnabled && prefs.getBoolean(KEY_ALARM_VIBRATE_5M, true)
-        val soundDurationMs = prefs.getLong(KEY_ALARM_SOUND_DURATION_MS, 5_000L)
-            .coerceIn(5_000L, 5 * 60 * 1000L)
-        val vibrateDurationMs = prefs.getLong(KEY_ALARM_VIBRATE_DURATION_MS, 5_000L)
-            .coerceIn(5_000L, 5 * 60 * 1000L)
+        val soundDurationMs = prefs.getLong(KEY_ALARM_SOUND_DURATION_MS, 500L)
+            .coerceIn(500L, 5 * 60 * 1000L)
+        val vibrateDurationMs = prefs.getLong(KEY_ALARM_VIBRATE_DURATION_MS, 500L)
+            .coerceIn(500L, 5 * 60 * 1000L)
 
         // Use a HIGH-importance channel based on the current toggle combination.
         // The channels themselves are kept silent in ensureNotificationChannel(),
@@ -1053,7 +1075,6 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
         // ✅ Left side: DIU logo (large icon)
         // Fixed color so system dark mode cannot change notification appearance
         val COLOR_DEEP_BLUE = 0xFF0B3D91.toInt()
-
 
         val builder = NotificationCompat.Builder(context, channelId)
             // ✅ Right side logo remove: small icon generic (MIUI header এ DIU logo দেখাবে না)

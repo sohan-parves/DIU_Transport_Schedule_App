@@ -354,8 +354,23 @@ class AdminMessagingService : FirebaseMessagingService() {
             )
         } else null
 
+        val originalLargeIcon = try {
+            androidx.core.content.ContextCompat.getDrawable(appContext, com.sohan.diutransportschedule.R.mipmap.ic_launcher_round)?.let { drawable ->
+                val bitmap = android.graphics.Bitmap.createBitmap(
+                    drawable.intrinsicWidth.coerceAtLeast(192),
+                    drawable.intrinsicHeight.coerceAtLeast(192),
+                    android.graphics.Bitmap.Config.ARGB_8888
+                )
+                val canvas = android.graphics.Canvas(bitmap)
+                drawable.setBounds(0, 0, canvas.width, canvas.height)
+                drawable.draw(canvas)
+                bitmap
+            }
+        } catch (_: Exception) { null }
+
         val builder = NotificationCompat.Builder(appContext, ADMIN_MSG_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_fcm_status)
+            .setLargeIcon(originalLargeIcon)
             .setContentTitle(title)
             .setContentText(body)
             .setTicker(title)

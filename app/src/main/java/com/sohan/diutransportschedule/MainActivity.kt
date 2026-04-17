@@ -279,7 +279,8 @@ class MainActivity : ComponentActivity() {
             else -> true
         }
 
-        val dialog = AlertDialog.Builder(this)
+        val dialogTheme = if (dark) android.R.style.Theme_DeviceDefault_Dialog_Alert else android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
+        val dialog = AlertDialog.Builder(this, dialogTheme)
             .setTitle("Permission Required")
             .setMessage(buildPermissionIntroMessage(permission))
             .setCancelable(true)
@@ -410,9 +411,9 @@ class MainActivity : ComponentActivity() {
             val e = sp.edit()
             if (!sp.contains("alarm_sound_5m")) e.putBoolean("alarm_sound_5m", true)
             if (!sp.contains("alarm_vibrate_5m")) e.putBoolean("alarm_vibrate_5m", true)
-            // Default duration: 5 seconds (sound + vibration)
-            if (!sp.contains("alarm_sound_duration_ms")) e.putLong("alarm_sound_duration_ms", 5_000L)
-            if (!sp.contains("alarm_vibrate_duration_ms")) e.putLong("alarm_vibrate_duration_ms", 5_000L)
+            // Default duration: 1 second (sound + vibration)
+            if (!sp.contains("alarm_sound_duration_ms")) e.putLong("alarm_sound_duration_ms", 1_000L)
+            if (!sp.contains("alarm_vibrate_duration_ms")) e.putLong("alarm_vibrate_duration_ms", 1_000L)
             e.apply()
         }
         if (BuildConfig.DEBUG && USE_EMULATOR) {
@@ -447,10 +448,20 @@ class MainActivity : ComponentActivity() {
                         if (dark) android.graphics.Color.parseColor("#0B1220")
                         else android.graphics.Color.parseColor("#F7F8FA")
                     )
+                    
+                    val insetsController = androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
+                    // If dark is true, background is dark, so text should NOT be light (it should be white/night-themed)
+                    // "isAppearanceLightStatusBars = true" means "draw dark icons".
+                    insetsController.isAppearanceLightStatusBars = !dark
+                    insetsController.isAppearanceLightNavigationBars = !dark
                 }
                 // ✅ FIRST TIME ENTER = permission ask + feature guide
                 RequestStartupPermissionsAndFeatureGuide()
                 LaunchedEffect(dark) {
+                    androidx.appcompat.app.AppCompatDelegate.setDefaultNightMode(
+                        if (dark) androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES else androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
+                    )
+
                     val prefs = applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
                     val current = when {
                         prefs.contains("dark_mode") -> prefs.getBoolean("dark_mode", false)
@@ -669,8 +680,23 @@ class MainActivity : ComponentActivity() {
             )
         } else null
 
+        val originalLargeIcon = try {
+            androidx.core.content.ContextCompat.getDrawable(context, com.sohan.diutransportschedule.R.mipmap.ic_launcher_round)?.let { drawable ->
+                val bitmap = android.graphics.Bitmap.createBitmap(
+                    drawable.intrinsicWidth.coerceAtLeast(192),
+                    drawable.intrinsicHeight.coerceAtLeast(192),
+                    android.graphics.Bitmap.Config.ARGB_8888
+                )
+                val canvas = android.graphics.Canvas(bitmap)
+                drawable.setBounds(0, 0, canvas.width, canvas.height)
+                drawable.draw(canvas)
+                bitmap
+            }
+        } catch (_: Exception) { null }
+
         val b = NotificationCompat.Builder(context, channelId)
-            .setSmallIcon(R.drawable.diu_logo)
+            .setSmallIcon(R.drawable.ic_fcm_status)
+            .setLargeIcon(originalLargeIcon)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))

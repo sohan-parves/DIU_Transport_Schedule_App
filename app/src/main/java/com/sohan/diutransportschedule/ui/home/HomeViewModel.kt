@@ -951,7 +951,7 @@ class RouteAlarmReceiver : BroadcastReceiver() {
 
         val notificationId = (routeNo + kind + timeText).hashCode()
         val notif = NotificationCompat.Builder(context, "route_notifications")
-            .setSmallIcon(R.drawable.ic_dialog_info)
+            .setSmallIcon(com.sohan.diutransportschedule.R.drawable.ic_fcm_status)
             // TIME is the primary headline
             .setContentTitle(title)
             // Secondary info in the collapsed view

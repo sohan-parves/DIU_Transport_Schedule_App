@@ -14,8 +14,8 @@ android {
         applicationId = "com.sohan.diutransportschedule"
         minSdk = 30
         targetSdk = 36
-        versionCode = 36
-        versionName = "1.5.1"
+        versionCode = 37
+        versionName = "1.5.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -28,7 +28,8 @@ android {
             buildConfigField("boolean", "PLAY_STORE_BUILD", "false")
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             buildConfigField("boolean", "PLAY_STORE_BUILD", "true")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

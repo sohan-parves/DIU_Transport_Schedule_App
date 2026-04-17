@@ -121,7 +121,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.geometry.Offset
 import android.util.Log
-import androidx.compose.foundation.isSystemInDarkTheme
+// Removing unused import
 import com.google.firebase.messaging.FirebaseMessaging
 import com.sohan.diutransportschedule.MainActivity
 import com.sohan.diutransportschedule.notifications.AdminMessagingService
@@ -217,6 +217,7 @@ fun HomeScreen(
     onOpenNotice: () -> Unit = {}
 ) {
     // ---- VM state ----
+    val effectiveSelectedRoute by vm.effectiveSelectedRouteForToday.collectAsState()
     val selectedRoute by vm.selectedRoute.collectAsState()
     val syncing by vm.isSyncing.collectAsState()
     val items by vm.items.collectAsState()
@@ -510,7 +511,8 @@ fun HomeScreen(
     )
 
     // Expanded state per card
-    val expandedIds = rememberSaveable { mutableStateOf(setOf<String>()) }
+    val userExpandedIds = rememberSaveable { mutableStateOf(setOf<String>()) }
+    val userClosedIds = rememberSaveable { mutableStateOf(setOf<String>()) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -631,14 +633,7 @@ fun HomeScreen(
 
                 Spacer(Modifier.height(2.dp))
 
-                if (showUpdate && updateMessage.isNotBlank()) {
-                    UpdateBanner(
-                        message = updateMessage,
-                        onOk = { vm.dismissUpdate() },
-                        appDark = appDark,
-                        onOpen = { showUpdateOverlay = true }
-                    )
-                }
+
 
                 if (syncStatusMessage.isNotBlank()) {
                     UpdateBanner(
@@ -668,19 +663,35 @@ fun HomeScreen(
                         key = { it.stableId() }
                     ) { schedule ->
                         val id = schedule.stableId()
-                        val expanded = expandedIds.value.contains(id)
 
-                        // If user is filtering (search text or route filter), keep cards expanded by default
-                        val collapseWhenMany = query.isBlank() && selectedRoute.equals("ALL", ignoreCase = true)
+                        val isRouteSelectedProfile = !effectiveSelectedRoute.equals("ALL", ignoreCase = true) &&
+                                schedule.routeNo.equals(effectiveSelectedRoute, ignoreCase = true)
+
+                        val expanded = if (isRouteSelectedProfile) {
+                            !userClosedIds.value.contains(id)
+                        } else {
+                            userExpandedIds.value.contains(id)
+                        }
+
+                        // If user is filtering (search text), keep via text expanded
+                        val collapseWhenMany = query.isBlank()
 
                         PremiumAccordionScheduleCard(
                             item = schedule,
                             expanded = expanded,
                             onToggle = {
-                                expandedIds.value = if (expanded) {
-                                    expandedIds.value - id
+                                if (isRouteSelectedProfile) {
+                                    userClosedIds.value = if (userClosedIds.value.contains(id)) {
+                                        userClosedIds.value - id
+                                    } else {
+                                        userClosedIds.value + id
+                                    }
                                 } else {
-                                    expandedIds.value + id
+                                    userExpandedIds.value = if (userExpandedIds.value.contains(id)) {
+                                        userExpandedIds.value - id
+                                    } else {
+                                        userExpandedIds.value + id
+                                    }
                                 }
                             },
                             defaultCollapsedWhenMany = collapseWhenMany,
@@ -744,6 +755,9 @@ fun HomeScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 },
+                containerColor = if (dark) Color(0xFF1E1E1E) else Color.White,
+                titleContentColor = if (dark) Color.White else Color.Black,
+                textContentColor = if (dark) Color.White.copy(alpha=0.88f) else Color.Black.copy(alpha=0.88f),
                 confirmButton = {
                     TextButton(
                         onClick = {
@@ -1644,11 +1658,13 @@ private fun PremiumAccordionScheduleCard(
 
             Spacer(Modifier.height(2.dp))
 
-            val stopsList = item.routeDetails
-                .replace("<>", "→")
-                .split("→")
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
+            val stopsList = remember(key) {
+                item.routeDetails
+                    .replace("<>", "→")
+                    .split("→")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+            }
 
             if (stopsList.isNotEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2088,7 +2104,7 @@ private fun TimeChipsRow(times: List<String>, multiline: Boolean, appDark: Boole
                     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)
                 else
                     TimeChipBorderLight
-                ).copy(alpha = 0.22f)
+                        ).copy(alpha = 0.22f)
             } else {
                 if (appDark)
                     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f)
@@ -2554,7 +2570,8 @@ private fun NoticePopupWatcher() {
     }
 
     if (show) {
-        val dark = isSystemInDarkTheme()
+        val surfaceColor = MaterialTheme.colorScheme.surface
+        val dark = (surfaceColor.red * 0.299f + surfaceColor.green * 0.587f + surfaceColor.blue * 0.114f) < 0.5f
         val btnColor = if (dark) Color.White else Color.Black
 
         val preview = remember(body) {

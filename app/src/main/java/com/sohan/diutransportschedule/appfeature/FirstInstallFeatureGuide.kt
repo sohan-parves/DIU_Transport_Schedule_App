@@ -13,15 +13,15 @@ object AppFeatureGuideContent {
         items = listOf(
             AppFeatureGuideItem(
                 title = "Step 1: Select your routes",
-                description = "Go to Profile and select one daily route and one Friday route. Daily route works for regular days, and Friday route is used only on Friday."
+                description = "Go to Settings and select one daily route and one Friday route. Daily route works for regular days, and Friday route is used only on Friday."
             ),
             AppFeatureGuideItem(
                 title = "Step 2: Turn on reminders",
-                description = "Enable Notify Me from Profile to get route-based reminders. The app will ask for notification and exact alarm permissions for reliable alerts."
+                description = "Enable Notify Me from Settings to get route-based reminders. The app will ask for notification and exact alarm permissions for reliable alerts."
             ),
             AppFeatureGuideItem(
                 title = "Step 3: Set sound and vibration",
-                description = "Choose ringtone, vibration pattern, and alert duration from Profile. Alert sound and vibration will run for your selected duration."
+                description = "Choose ringtone, vibration pattern, and alert duration from Settings. Alert sound and vibration will run for your selected duration."
             ),
             AppFeatureGuideItem(
                 title = "Map and live location",

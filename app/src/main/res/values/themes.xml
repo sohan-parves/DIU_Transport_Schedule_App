@@ -2,7 +2,7 @@
 <resources>
 
     <!-- Main app theme (Compose uses this after launch) -->
-    <style name="Theme.DIUTransportSchedule" parent="Theme.Material3.Dark.NoActionBar">
+    <style name="Theme.DIUTransportSchedule" parent="Theme.Material3.DayNight.NoActionBar">
         <!-- Prevent white flash behind Compose while launching -->
         <item name="android:windowBackground">#0B1220</item>
         <!-- Optional: keep status bar/navigation consistent on launch -->

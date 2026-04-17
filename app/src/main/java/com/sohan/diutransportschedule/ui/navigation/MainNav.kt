@@ -26,10 +26,17 @@ fun MainNav(
     onNoticeOpened: () -> Unit = {}
 ) {
     var currentRoute by rememberSaveable { mutableStateOf("home") }
+    var profileRenderKey by rememberSaveable { mutableIntStateOf(0) }
     val saveableStateHolder = rememberSaveableStateHolder()
 
     fun navigateInstant(route: String) {
         if (currentRoute == route) return
+
+        // 🔥 reset ProfileScreen state when leaving profile tab
+        if (currentRoute == "profile" && route != "profile") {
+            profileRenderKey++
+        }
+
         currentRoute = route
     }
 
@@ -58,7 +65,12 @@ fun MainNav(
                         BottomTab.NOTICE -> "notice"
                         BottomTab.PROFILE -> "profile"
                     }
-                    navigateInstant(route)
+
+                    if (tab == BottomTab.PROFILE && currentRoute == "profile") {
+                        profileRenderKey++
+                    } else {
+                        navigateInstant(route)
+                    }
                 }
             )
         }
@@ -107,7 +119,7 @@ fun MainNav(
                     .zIndex(if (currentRoute == "profile") 4f else 0f)
                     .background(if (currentRoute == "profile") MaterialTheme.colorScheme.background else Color.Transparent)
             ) {
-                saveableStateHolder.SaveableStateProvider("profile") {
+                saveableStateHolder.SaveableStateProvider("profile_$profileRenderKey") {
                     ProfileScreen(vm)
                 }
             }

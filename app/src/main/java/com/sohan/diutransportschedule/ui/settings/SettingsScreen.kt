@@ -1,34 +1,64 @@
 package com.sohan.diutransportschedule.ui.settings
 
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.OpenableColumns
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.ui.platform.LocalView
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SettingsApplications
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -37,105 +67,75 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.graphics.compositeOver
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.foundation.layout.size
-import androidx.compose.material3.SwitchDefaults
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
-import android.content.Context
-import android.content.pm.PackageManager
-import android.media.AudioAttributes
-import android.media.MediaPlayer
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.produceState
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.tween
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.R
+import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
+import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
+import com.sohan.diutransportschedule.notifications.resetAlarmStateForNotifyTimeChange
+import com.sohan.diutransportschedule.ui.home.HomeViewModel
+import com.sohan.diutransportschedule.ui.home.RouteOption
+import com.sohan.diutransportschedule.ui.map.SelectedRoadStore
+import com.sohan.diutransportschedule.ui.theme.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
-import androidx.compose.material.icons.filled.GraphicEq
-import java.io.File
-import java.io.FileOutputStream
-import androidx.core.app.NotificationManagerCompat
-import com.sohan.diutransportschedule.R
-import androidx.compose.material3.ColorScheme
-import kotlin.math.ln
-import android.Manifest
-import android.provider.OpenableColumns
-import android.provider.Settings
-import androidx.core.content.ContextCompat
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.runtime.Immutable
-import androidx.compose.material.icons.outlined.Info
-import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
-import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.foundation.clickable
-import androidx.compose.material.icons.filled.BatteryChargingFull
-import androidx.compose.material.icons.filled.CleaningServices
-import androidx.compose.material.icons.filled.SettingsApplications
-import androidx.compose.material.icons.filled.OpenInNew
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.TextButton
-import com.sohan.diutransportschedule.MainActivity
-import com.sohan.diutransportschedule.notifications.resetAlarmStateForNotifyTimeChange
-import com.sohan.diutransportschedule.ui.map.SelectedRoadStore
-import com.sohan.diutransportschedule.ui.home.HomeViewModel
-import com.sohan.diutransportschedule.ui.home.RouteOption
-import com.sohan.diutransportschedule.ui.theme.*
 import java.time.DayOfWeek
 import java.time.LocalDate
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import kotlin.math.ln
+import androidx.compose.foundation.layout.offset
 
 private fun ColorScheme.surfaceColorAtElevationCompat(elevation: Dp): Color {
     if (elevation == 0.dp) return surface
@@ -201,7 +201,7 @@ fun ProfileScreen(vm: HomeViewModel) {
             ?: RouteOption("ALL", "All Routes")
     }
 
-    val selectedFridayRouteOption = remember(selectedRoute, fridayRouteOptions) {
+    remember(selectedRoute, fridayRouteOptions) {
         fridayRouteOptions.firstOrNull { it.routeNo.equals(selectedRoute, ignoreCase = true) }
     }
 
@@ -225,7 +225,6 @@ fun ProfileScreen(vm: HomeViewModel) {
         }
     }
 
-    val selectedRouteLabel by vm.selectedRouteLabel.collectAsState()
     val isSyncing by vm.isSyncing.collectAsState()
     val primaryText = if (dark) CardSurfaceLight else MaterialTheme.colorScheme.onSurface
     val secondaryText =
@@ -365,6 +364,7 @@ fun ProfileScreen(vm: HomeViewModel) {
     var showRouteSelectionPage by rememberSaveable { mutableStateOf(false) }
     var showNotificationSettingsPage by rememberSaveable { mutableStateOf(false) }
     var showNotificationOptimizationPage by rememberSaveable { mutableStateOf(false) }
+    var showAboutPage by remember { mutableStateOf(false) }
 
     val playPreviewVibration: (String) -> Unit = remember(ctx) {
         { patternName ->
@@ -664,6 +664,8 @@ fun ProfileScreen(vm: HomeViewModel) {
     }
 
     val alarmDurationOptions = listOf(
+        500L to "0.5 sec",
+        1_000L to "1 sec",
         5_000L to "5 sec",
         10_000L to "10 sec",
         15_000L to "15 sec",
@@ -674,16 +676,59 @@ fun ProfileScreen(vm: HomeViewModel) {
         300_000L to "5 min"
     )
 
+    fun normalizeAlarmDuration(durationMs: Long): Long {
+        return alarmDurationOptions.firstOrNull { it.first == durationMs }?.first ?: 500L
+    }
+
     var alarmSoundDurationMs by rememberSaveable {
         mutableLongStateOf(
-            alertPrefs.getLong("alarm_sound_duration_ms", 5_000L).coerceIn(5_000L, 5 * 60 * 1000L)
+            normalizeAlarmDuration(
+                alertPrefs.getLong("alarm_sound_duration_ms", 500L)
+                    .coerceIn(500L, 5 * 60 * 1000L)
+            )
         )
     }
 
     var alarmVibrateDurationMs by rememberSaveable {
         mutableLongStateOf(
-            alertPrefs.getLong("alarm_vibrate_duration_ms", 5_000L).coerceIn(5_000L, 5 * 60 * 1000L)
+            normalizeAlarmDuration(
+                alertPrefs.getLong("alarm_vibrate_duration_ms", 500L)
+                    .coerceIn(500L, 5 * 60 * 1000L)
+            )
         )
+    }
+
+    LaunchedEffect(Unit) {
+        val defaultDurationAppliedKey = "default_duration_0_5s_applied_v1"
+        val defaultDurationMs = 500L
+        val didApplyDefaultDuration = alertPrefs.getBoolean(defaultDurationAppliedKey, false)
+
+        if (!didApplyDefaultDuration) {
+            // One-time migration: move existing installs to 0.5 sec as requested default.
+            alarmSoundDurationMs = defaultDurationMs
+            alarmVibrateDurationMs = defaultDurationMs
+            alertPrefs.edit()
+                .putLong("alarm_sound_duration_ms", defaultDurationMs)
+                .putLong("alarm_vibrate_duration_ms", defaultDurationMs)
+                .putBoolean(defaultDurationAppliedKey, true)
+                .apply()
+            return@LaunchedEffect
+        }
+
+        val savedSound = alertPrefs.getLong("alarm_sound_duration_ms", defaultDurationMs)
+        val normalizedSound = normalizeAlarmDuration(savedSound.coerceIn(500L, 5 * 60 * 1000L))
+        if (savedSound != normalizedSound) {
+            alertPrefs.edit().putLong("alarm_sound_duration_ms", normalizedSound).apply()
+            alarmSoundDurationMs = normalizedSound
+        }
+
+        val savedVibration = alertPrefs.getLong("alarm_vibrate_duration_ms", defaultDurationMs)
+        val normalizedVibration =
+            normalizeAlarmDuration(savedVibration.coerceIn(500L, 5 * 60 * 1000L))
+        if (savedVibration != normalizedVibration) {
+            alertPrefs.edit().putLong("alarm_vibrate_duration_ms", normalizedVibration).apply()
+            alarmVibrateDurationMs = normalizedVibration
+        }
     }
 
     var alarmSoundDurationMenuExpanded by rememberSaveable { mutableStateOf(false) }
@@ -700,7 +745,7 @@ fun ProfileScreen(vm: HomeViewModel) {
     var previewingVibrationPattern by rememberSaveable { mutableStateOf("") }
 
     // Premium card styling (light mode)
-    val premiumLightCard = CardSurfaceLight
+    CardSurfaceLight
     val premiumLightBorder = TimeChipBorderLight
     val premiumLightDivider = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
 
@@ -713,10 +758,7 @@ fun ProfileScreen(vm: HomeViewModel) {
         uncheckedBorderColor = MaterialTheme.colorScheme.outlineVariant
     )
 
-    var routeMenuExpanded by rememberSaveable { mutableStateOf(false) }
-
     val showUpdateBanner by vm.showUpdateBanner.collectAsState()
-    val compactMode by vm.compactMode.collectAsState()
     var showReloadPopup by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(isSyncing, showReloadPopup) {
@@ -734,6 +776,13 @@ fun ProfileScreen(vm: HomeViewModel) {
         if (showReloadPopup && isSyncing) {
             showReloadPopup = false
         }
+    }
+
+    if (showAboutPage) {
+        AboutPage(
+            onBack = { showAboutPage = false }
+        )
+        return
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -829,16 +878,10 @@ fun ProfileScreen(vm: HomeViewModel) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 4.dp, top = 8.dp, bottom = 0.dp),
+                        .padding(start = 2.dp, top = 0.dp, bottom = 0.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text(
-                        text = "Select",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = primaryText
-                    )
-
                     val refreshColor = if (dark) MaterialTheme.colorScheme.secondary
                     else MaterialTheme.colorScheme.primary
 
@@ -846,12 +889,18 @@ fun ProfileScreen(vm: HomeViewModel) {
                     val canTapRefresh =
                         !isSyncing && (System.currentTimeMillis() - lastRefreshTapMs >= 5 * 60 * 1000L)
 
+                    Spacer(modifier = Modifier.weight(1f))
+
                     IconButton(
                         onClick = {
                             lastRefreshTapMs = System.currentTimeMillis()
                             showReloadPopup = true
                             vm.refresh(showBannerIfUpdated = true)
-                        }, enabled = canTapRefresh, modifier = Modifier.size(36.dp)
+                        },
+                        enabled = canTapRefresh,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .offset(y = (-4).dp)
                     ) {
                         if (isSyncing) {
                             CircularProgressIndicator(
@@ -887,18 +936,79 @@ fun ProfileScreen(vm: HomeViewModel) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Route Selection",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = primaryText
-                            )
-                            Text(
-                                text = "Tap to open daily and Friday route selection",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = secondaryText,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "Route Selection",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = primaryText,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+
+                                val routeSelectionSubtitle = if (isFriday) {
+                                    val fridayRoute = selectedFridayRouteNoUi.trim()
+                                    when {
+                                        fridayRoute.isBlank() || fridayRoute.equals(
+                                            "ALL",
+                                            ignoreCase = true
+                                        ) -> {
+                                            "No Friday route selected"
+                                        }
+
+                                        else -> {
+                                            val match = fridayDropdownItems.firstOrNull {
+                                                it.routeNo.trim()
+                                                    .equals(fridayRoute, ignoreCase = true)
+                                            }
+                                            if (match != null && match.label.isNotBlank()) {
+                                                "Friday • ${match.routeNo.trim()} • ${match.label.trim()}"
+                                            } else {
+                                                "Friday • $fridayRoute"
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    val dailyRoute = selectedRoute.trim()
+                                    when {
+                                        dailyRoute.isBlank() || dailyRoute.equals(
+                                            "ALL",
+                                            ignoreCase = true
+                                        ) -> {
+                                            "No daily route selected"
+                                        }
+
+                                        else -> {
+                                            val match = dailyDropdownItems.firstOrNull {
+                                                it.routeNo.trim()
+                                                    .equals(dailyRoute, ignoreCase = true)
+                                            }
+                                            if (match != null && match.compactLabel.isNotBlank()) {
+                                                "Daily • ${match.routeNo.trim()} • ${match.compactLabel.trim()}"
+                                            } else {
+                                                "Daily • $dailyRoute"
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(0.85f),
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (dark) 0.10f else 0.06f)
+                                ) {
+                                    Text(
+                                        text = routeSelectionSubtitle,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                                        color = secondaryText,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
 
                         Icon(
@@ -1194,7 +1304,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             }
                                         }
 
-                                        val effectiveNotificationRouteNo = remember(
+                                        remember(
                                             key1 = isFriday,
                                             key2 = selectedDailyRouteNo,
                                             key3 = selectedFridayRouteNoUi
@@ -1762,11 +1872,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             .padding(16.dp),
                                         verticalArrangement = Arrangement.spacedBy(14.dp)
                                     ) {
-                                        Text(
-                                            text = "Notifications",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            color = primaryText
-                                        )
 
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
@@ -1775,23 +1880,8 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         ) {
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    text = "Master Notification",
+                                                    text = "Notification",
                                                     style = MaterialTheme.typography.bodyLarge,
-                                                    color = primaryText
-                                                )
-                                                Text(
-                                                    text = when {
-                                                        notificationsBlockedByRoute -> {
-                                                            if (isFriday) {
-                                                                "Friday: pick a Friday route (not ALL). Daily route does not apply today."
-                                                            } else {
-                                                                "Non-Friday: pick a daily route (not ALL, not a Friday route). Friday route does not apply today."
-                                                            }
-                                                        }
-
-                                                        else -> "Turn this ON to enable notifications"
-                                                    },
-                                                    style = MaterialTheme.typography.bodyMedium,
                                                     color = primaryText
                                                 )
                                             }
@@ -1894,19 +1984,12 @@ fun ProfileScreen(vm: HomeViewModel) {
 
                                         if (notificationsBlockedByRoute) {
                                             Text(
-                                                text = if (isFriday) "Today is Friday — only the Friday route dropdown controls whether notifications can be on."
-                                                else "Any day except Friday — only the daily route dropdown controls whether notifications can be on.",
+                                                text = if (isFriday) "Select Friday route to get notified"
+                                                else "Select Daily route to get notified",
                                                 style = MaterialTheme.typography.bodySmall,
                                                 color = secondaryText
                                             )
                                         }
-
-                                        HorizontalDivider(
-                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
-                                                alpha = 0.10f
-                                            )
-                                            else premiumLightDivider
-                                        )
 
                                         // --- Notification lead time state ---
                                         var notifyLeadMinutesDraft by remember(notifyLeadMinutes) {
@@ -1926,10 +2009,20 @@ fun ProfileScreen(vm: HomeViewModel) {
                                         AnimatedVisibility(visible = effectiveNotificationsEnabled) {
                                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                                 Text(
-                                                    text = "Notify me ${
-                                                        notifyLeadMinutesDraft.toInt()
-                                                            .coerceIn(5, 120)
-                                                    } minutes before",
+                                                    text = run {
+                                                        val minutes = notifyLeadMinutesDraft.toInt().coerceIn(5, 120)
+                                                        if (minutes >= 60) {
+                                                            val hours = minutes / 60
+                                                            val remainingMinutes = minutes % 60
+                                                            if (remainingMinutes == 0) {
+                                                                "Notify me ${hours} hour${if (hours > 1) "s" else ""} before"
+                                                            } else {
+                                                                "Notify me ${hours} hour${if (hours > 1) "s" else ""} ${remainingMinutes} min before"
+                                                            }
+                                                        } else {
+                                                            "Notify me ${minutes} minutes before"
+                                                        }
+                                                    },
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     color = primaryText
                                                 )
@@ -1981,18 +2074,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                         )
                                                     ) else SliderDefaults.colors()
                                                 )
-
-                                                Text(
-                                                    text = "Default: 30 minutes",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = primaryText
-                                                )
                                             }
-                                            HorizontalDivider(
-                                                color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
-                                                    alpha = 0.10f
-                                                ) else premiumLightDivider
-                                            )
                                         }
                                         AnimatedVisibility(visible = effectiveNotificationsEnabled) {
                                             Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
@@ -2012,11 +2094,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             text = "Ringtone",
                                                             style = MaterialTheme.typography.bodyLarge,
                                                             color = primaryText
-                                                        )
-                                                        Text(
-                                                            text = "Play alarm ringtone when a notice arrives",
-                                                            style = MaterialTheme.typography.bodyMedium,
-                                                            color = secondaryText
                                                         )
                                                     }
                                                     Switch(
@@ -2039,24 +2116,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             8.dp
                                                         )
                                                     ) {
-                                                        HorizontalDivider(
-                                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
-                                                                alpha = 0.10f
-                                                            ) else premiumLightDivider
-                                                        )
-
-                                                        Text(
-                                                            text = "Ringtone duration",
-                                                            style = MaterialTheme.typography.titleSmall,
-                                                            color = primaryText,
-                                                            fontWeight = FontWeight.SemiBold
-                                                        )
-
-                                                        Text(
-                                                            text = "Choose how long ringtone should continue",
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = secondaryText
-                                                        )
 
                                                         ExposedDropdownMenuBox(
                                                             expanded = alarmSoundDurationMenuExpanded,
@@ -2067,7 +2126,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             val selectedAlarmSoundDurationLabel =
                                                                 alarmDurationOptions.firstOrNull {
                                                                     it.first == alarmSoundDurationMs
-                                                                }?.second ?: "30 sec"
+                                                                }?.second ?: "0.5 sec"
 
                                                             OutlinedTextField(
                                                                 value = selectedAlarmSoundDurationLabel,
@@ -2148,67 +2207,15 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                     ) {
                                                         Spacer(Modifier.height(4.dp))
 
-                                                        Text(
-                                                            text = customRingtoneName,
-                                                            modifier = Modifier
-                                                                .fillMaxWidth()
-                                                                .clip(RoundedCornerShape(14.dp))
-                                                                .background(
-                                                                    if (hasPickedCustomFile) {
-                                                                        if (dark) {
-                                                                            MaterialTheme.colorScheme.secondary.copy(
-                                                                                alpha = 0.16f
-                                                                            )
-                                                                        } else {
-                                                                            MaterialTheme.colorScheme.primary.copy(
-                                                                                alpha = 0.10f
-                                                                            )
-                                                                        }
-                                                                    } else {
-                                                                        if (dark) {
-                                                                            MaterialTheme.colorScheme.onSurface.copy(
-                                                                                alpha = 0.04f
-                                                                            )
-                                                                        } else {
-                                                                            MaterialTheme.colorScheme.onSurface.copy(
-                                                                                alpha = 0.025f
-                                                                            )
-                                                                        }
-                                                                    }
-                                                                )
-                                                                .border(
-                                                                    width = if (hasPickedCustomFile) 1.dp else 0.8.dp,
-                                                                    color = if (hasPickedCustomFile) {
-                                                                        if (dark) {
-                                                                            MaterialTheme.colorScheme.secondary.copy(
-                                                                                alpha = 0.55f
-                                                                            )
-                                                                        } else {
-                                                                            MaterialTheme.colorScheme.primary.copy(
-                                                                                alpha = 0.28f
-                                                                            )
-                                                                        }
-                                                                    } else {
-                                                                        MaterialTheme.colorScheme.onSurface.copy(
-                                                                            alpha = if (dark) 0.10f else 0.08f
-                                                                        )
-                                                                    },
-                                                                    shape = RoundedCornerShape(14.dp)
-                                                                )
-                                                                .padding(
-                                                                    horizontal = 12.dp,
-                                                                    vertical = 10.dp
-                                                                ),
-                                                            color = if (hasPickedCustomFile) {
-                                                                if (dark) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                                                            } else {
-                                                                primaryText
-                                                            },
-                                                            fontWeight = if (hasPickedCustomFile) FontWeight.SemiBold else FontWeight.Medium,
-                                                            style = MaterialTheme.typography.bodyMedium,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
+                                                        Column(
+                                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                                        ) {
+                                                            Text(
+                                                                text = customRingtoneName,
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                color = secondaryText
+                                                            )
+                                                        }
 
                                                         Row(
                                                             modifier = Modifier.fillMaxWidth(),
@@ -2231,33 +2238,33 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                                 )
                                                             }
 
-                                                            OutlinedButton(
-                                                                onClick = {
-                                                                    stopPreviewRingtone()
-                                                                    customRingtoneUri =
-                                                                        appDefaultRingtoneUri
-                                                                    customRingtoneName =
-                                                                        appDefaultRingtoneName
-                                                                    alertPrefs.edit().putString(
-                                                                        "custom_ringtone_uri",
-                                                                        appDefaultRingtoneUri
-                                                                    ).putString(
-                                                                        "custom_ringtone_name",
-                                                                        appDefaultRingtoneName
-                                                                    ).apply()
-
-                                                                    showToggleMessage("App default ringtone selected")
-                                                                },
-                                                                modifier = Modifier
-                                                                    .weight(1f)
-                                                                    .height(44.dp)
-                                                            ) {
-                                                                Text(
-                                                                    text = "Use default",
-                                                                    color = if (dark) Color.White else Color.Black,
-                                                                    fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
-                                                                )
-                                                            }
+//                                                            OutlinedButton(
+//                                                                onClick = {
+//                                                                    stopPreviewRingtone()
+//                                                                    customRingtoneUri =
+//                                                                        appDefaultRingtoneUri
+//                                                                    customRingtoneName =
+//                                                                        appDefaultRingtoneName
+//                                                                    alertPrefs.edit().putString(
+//                                                                        "custom_ringtone_uri",
+//                                                                        appDefaultRingtoneUri
+//                                                                    ).putString(
+//                                                                        "custom_ringtone_name",
+//                                                                        appDefaultRingtoneName
+//                                                                    ).apply()
+//
+//                                                                    showToggleMessage("App default ringtone selected")
+//                                                                },
+//                                                                modifier = Modifier
+//                                                                    .weight(1f)
+//                                                                    .height(44.dp)
+//                                                            ) {
+//                                                                Text(
+//                                                                    text = "Use default",
+//                                                                    color = if (dark) Color.White else Color.Black,
+//                                                                    fontWeight = if (dark) FontWeight.Medium else FontWeight.Bold
+//                                                                )
+//                                                            }
                                                         }
                                                         Spacer(Modifier.height(8.dp))
                                                     }
@@ -2280,11 +2287,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             style = MaterialTheme.typography.bodyLarge,
                                                             color = primaryText
                                                         )
-                                                        Text(
-                                                            text = "Vibrate strongly when a notice arrives",
-                                                            style = MaterialTheme.typography.bodyMedium,
-                                                            color = secondaryText
-                                                        )
                                                     }
                                                     Switch(
                                                         checked = alarmVibrate5mEnabled,
@@ -2306,24 +2308,6 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             8.dp
                                                         )
                                                     ) {
-                                                        HorizontalDivider(
-                                                            color = if (dark) MaterialTheme.colorScheme.onSurface.copy(
-                                                                alpha = 0.10f
-                                                            ) else premiumLightDivider
-                                                        )
-
-                                                        Text(
-                                                            text = "Vibration duration",
-                                                            style = MaterialTheme.typography.titleSmall,
-                                                            color = primaryText,
-                                                            fontWeight = FontWeight.SemiBold
-                                                        )
-
-                                                        Text(
-                                                            text = "Choose how long vibration should continue",
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = secondaryText
-                                                        )
 
                                                         ExposedDropdownMenuBox(
                                                             expanded = alarmVibrateDurationMenuExpanded,
@@ -2334,7 +2318,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             val selectedAlarmVibrateDurationLabel =
                                                                 alarmDurationOptions.firstOrNull {
                                                                     it.first == alarmVibrateDurationMs
-                                                                }?.second ?: "30 sec"
+                                                                }?.second ?: "0.5 sec"
 
                                                             OutlinedTextField(
                                                                 value = selectedAlarmVibrateDurationLabel,
@@ -2489,7 +2473,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             )
 
                                             Text(
-                                                text = "Optimize battery settings for timely alerts",
+                                                text = "Optimize battery settings for timely alerts. Works on all devices.",
                                                 style = MaterialTheme.typography.bodyMedium,
                                                 color = secondaryText
                                             )
@@ -2521,6 +2505,57 @@ fun ProfileScreen(vm: HomeViewModel) {
                             @Suppress("DEPRECATION") pm.getPackageInfo(pkg, 0).versionName
                         }
                     }.getOrDefault("1.0")
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            showAboutPage = true
+                        },
+                    shape = RoundedCornerShape(22.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = if (dark) 0.dp else 2.dp),
+                    border = if (dark) null else BorderStroke(1.dp, premiumLightBorder),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (dark) {
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+                        } else {
+                            CardSurfaceLight
+                        }
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 22.dp, vertical = 20.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "About",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = primaryText,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Text(
+                                text = "App details, overview and developer information",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = secondaryText
+                            )
+                        }
+
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = "Open about page",
+                            tint = secondaryText,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
                 }
 
                 Card(
@@ -3423,6 +3458,8 @@ fun ProfileScreen(vm: HomeViewModel) {
                                 )
                             }
                         }
+
+
 
                         Card(
                             modifier = Modifier.fillMaxWidth(),
