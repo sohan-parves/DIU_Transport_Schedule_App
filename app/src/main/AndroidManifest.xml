@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".App"
@@ -28,7 +29,8 @@
             android:exported="true"
             android:theme="@style/Theme.DIUTransportSchedule.Splash"
             android:label=""
-            android:configChanges="uiMode|screenSize|orientation" />
+            android:configChanges="uiMode|screenSize|orientation"
+            android:launchMode="singleTop" />
 
         <activity-alias
             android:name=".Launcher"
@@ -46,7 +48,24 @@
 
         <receiver
             android:name=".notifications.ScheduleAlarmReceiver"
-            android:exported="false" />
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".ui.home.RouteAlarmReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="ROUTE_ALARM" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".notifications.AdminMessagingService"
             android:exported="false">

@@ -2,22 +2,38 @@ package com.sohan.diutransportschedule
 
 
 import android.Manifest
+import android.app.Activity
 import android.app.AlarmManager
+import android.app.AlertDialog
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
+import android.view.Window
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +43,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
@@ -37,36 +56,59 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.android.play.core.appupdate.AppUpdateManagerFactory
+import com.google.android.play.core.appupdate.AppUpdateOptions
+import com.google.android.play.core.install.model.AppUpdateType
+import com.google.android.play.core.install.model.UpdateAvailability
+import com.google.firebase.firestore.FirebaseFirestore
+import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
+import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
+import com.sohan.diutransportschedule.appfeature.AppUpdateFeatureGuideContent
+import com.sohan.diutransportschedule.appfeature.initializeFeatureGuideVersion
+import com.sohan.diutransportschedule.appfeature.markUpdateGuideShown
+import com.sohan.diutransportschedule.appfeature.markWelcomeGuideShown
+import com.sohan.diutransportschedule.appfeature.shouldShowUpdateGuide
+import com.sohan.diutransportschedule.appfeature.shouldShowWelcomeGuide
+import com.sohan.diutransportschedule.notifications.EXTRA_ALARM_FINGERPRINT
+import com.sohan.diutransportschedule.notifications.EXTRA_AT_MS
+import com.sohan.diutransportschedule.notifications.EXTRA_EXPLICIT_MIDNIGHT
+import com.sohan.diutransportschedule.notifications.EXTRA_SOURCE_TOKEN
+import com.sohan.diutransportschedule.notifications.RunningAlertController
+import com.sohan.diutransportschedule.notifications.ScheduleAlarmReceiver
+import com.sohan.diutransportschedule.notifications.tryIngestNoticeFromFcmLaunchIntent
 import com.sohan.diutransportschedule.ui.home.HomeViewModel
 import com.sohan.diutransportschedule.ui.navigation.MainNav
-import com.sohan.diutransportschedule.ui.theme.DIUTransportScheduleTheme
 import com.sohan.diutransportschedule.ui.notice.checkAndSyncNoticesFromMeta
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
-import android.content.pm.PackageManager
-import android.util.Log
+import com.sohan.diutransportschedule.ui.theme.DIUTransportScheduleTheme
+import kotlinx.coroutines.tasks.await
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
@@ -74,49 +116,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
 import java.util.Locale
-import android.app.Notification
-import androidx.core.view.WindowCompat
-import android.graphics.Color
-import androidx.core.view.WindowInsetsControllerCompat
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color as ComposeColor
-import android.view.Window
-import com.google.firebase.firestore.FirebaseFirestore
-import com.sohan.diutransportschedule.appfeature.AppFeatureGuideDialog
-import com.sohan.diutransportschedule.appfeature.AppUpdateFeatureGuideContent
-import com.sohan.diutransportschedule.appfeature.AppFeatureGuideContent
-import com.sohan.diutransportschedule.appfeature.initializeFeatureGuideVersion
-import com.sohan.diutransportschedule.appfeature.markUpdateGuideShown
-import com.sohan.diutransportschedule.appfeature.markWelcomeGuideShown
-import com.sohan.diutransportschedule.appfeature.shouldShowUpdateGuide
-import com.sohan.diutransportschedule.appfeature.shouldShowWelcomeGuide
-import com.sohan.diutransportschedule.notifications.tryIngestNoticeFromFcmLaunchIntent
-import android.app.Activity
-import com.google.android.play.core.appupdate.AppUpdateManagerFactory
-import com.google.android.play.core.appupdate.AppUpdateOptions
-import com.google.android.play.core.install.model.AppUpdateType
-import com.google.android.play.core.install.model.UpdateAvailability
-import kotlinx.coroutines.tasks.await
-import android.app.AlertDialog
-import android.widget.TextView
-import androidx.compose.foundation.layout.*
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import com.sohan.diutransportschedule.notifications.EXTRA_ALARM_FINGERPRINT
-import com.sohan.diutransportschedule.notifications.EXTRA_AT_MS
-import com.sohan.diutransportschedule.notifications.EXTRA_EXPLICIT_MIDNIGHT
-import com.sohan.diutransportschedule.notifications.EXTRA_SOURCE_TOKEN
-import com.sohan.diutransportschedule.notifications.RunningAlertController
-import com.sohan.diutransportschedule.notifications.ScheduleAlarmReceiver
 
 
 // ==============================
@@ -448,7 +448,7 @@ class MainActivity : ComponentActivity() {
                         if (dark) android.graphics.Color.parseColor("#0B1220")
                         else android.graphics.Color.parseColor("#F7F8FA")
                     )
-                    
+
                     val insetsController = androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
                     // If dark is true, background is dark, so text should NOT be light (it should be white/night-themed)
                     // "isAppearanceLightStatusBars = true" means "draw dark icons".
@@ -940,8 +940,13 @@ private fun ensureAdminUpdatesChannel(ctx: Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     val existing = nm.getNotificationChannel(ADMIN_UPDATES_CHANNEL_ID)
-    // If it exists but was created with sound/vibration, recreate as silent.
-    if (existing != null && (existing.sound != null || existing.shouldVibrate())) {
+    // If it exists but was created with lower importance or with sound/vibration,
+    // recreate it so the notification panel/heads-up behavior stays consistent.
+    if (existing != null && (
+                existing.importance < NotificationManager.IMPORTANCE_HIGH ||
+                        existing.sound != null ||
+                        existing.shouldVibrate()
+                )) {
         try {
             nm.deleteNotificationChannel(ADMIN_UPDATES_CHANNEL_ID)
         } catch (_: Throwable) {
@@ -953,13 +958,13 @@ private fun ensureAdminUpdatesChannel(ctx: Context) {
     val ch = NotificationChannel(
         ADMIN_UPDATES_CHANNEL_ID,
         "Admin Updates",
-        NotificationManager.IMPORTANCE_DEFAULT
+        NotificationManager.IMPORTANCE_HIGH
     ).apply {
         description = "Admin notices and important updates"
-        // Keep admin updates silent; only schedule alarms ring/vibrate.
         enableVibration(false)
         setSound(null, null)
         setShowBadge(true)
+        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
     }
     nm.createNotificationChannel(ch)
 }
@@ -970,7 +975,7 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
     LaunchedEffect(Unit) {
         ensureAdminUpdatesChannel(ctx)
     }
-    // ✅ Ask only once (first app entry), but do it step-by-step
+
     val prefs = remember {
         ctx.getSharedPreferences("startup_permissions", Context.MODE_PRIVATE)
     }
@@ -982,15 +987,10 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         mutableStateOf(shouldShowUpdateGuide(ctx))
     }
 
-    // asked=true মানে startup flow একবার complete হয়েছে
     var alreadyAsked by remember { mutableStateOf(prefs.getBoolean("asked", false)) }
-
-    // step: 0 = start, 1 = notif done, 2 = exact-alarm done, 3 = miui done
     var step by remember { mutableStateOf(prefs.getInt("step", 0)) }
 
-    // ✅ Notifications enabled (all versions) + permission (Android 13+)
     fun hasNotifPermission(): Boolean {
-        // If user disabled notifications for the whole app, nothing can be shown.
         if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return false
 
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -1003,7 +1003,6 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         }
     }
 
-    // ✅ Exact alarm (Android 12+)
     val alarmManager = remember {
         ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
     }
@@ -1014,10 +1013,8 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
     }
 
     fun isMiui(): Boolean = Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true)
-
     fun isOppo(): Boolean = Build.MANUFACTURER.equals("OPPO", ignoreCase = true)
     fun isRealme(): Boolean = Build.MANUFACTURER.equals("realme", ignoreCase = true)
-
     fun isColorOsOrRealmeUi(): Boolean = isOppo() || isRealme()
 
     fun openMiuiBatterySettings(context: Context) {
@@ -1027,20 +1024,20 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
                     "com.miui.securitycenter",
                     "com.miui.permcenter.autostart.AutoStartManagementActivity"
                 )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
         } catch (_: Throwable) {
             val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                 data = Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
         }
     }
 
     fun openOppoRealmeAutoStartSettings(context: Context) {
-        // ColorOS / Realme UI autostart / startup manager screens vary by OS version.
         val candidates = listOf(
-            // OPPO/realme common components
             Intent().setClassName(
                 "com.coloros.safecenter",
                 "com.coloros.safecenter.startupapp.StartupAppListActivity"
@@ -1069,11 +1066,9 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
                 context.startActivity(i)
                 return
             } catch (_: Throwable) {
-                // try next
             }
         }
 
-        // Fallback: app details
         val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", context.packageName, null)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1082,7 +1077,6 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
     }
 
     fun openIgnoreBatteryOptimizationsSettings(context: Context) {
-        // Generic Android screen (may not be honored by all OEMs)
         try {
             val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                 data = Uri.parse("package:${context.packageName}")
@@ -1098,13 +1092,12 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         }
     }
 
-    // local states
     var notifGranted by remember { mutableStateOf(hasNotifPermission()) }
     var exactAlarmGranted by remember { mutableStateOf(canExactAlarm()) }
-    // Show settings dialog if notifications are denied after first run
     var showNotifSettingsDialog by remember { mutableStateOf(false) }
+    var showExactAlarmDialog by remember { mutableStateOf(false) }
+    var showOemBgDialog by remember { mutableStateOf(false) }
 
-    // Re-check permissions when user returns from Settings
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -1120,10 +1113,10 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
     val hostActivity = ctx as? MainActivity
 
     fun finishStartupPermissionFlow() {
-        step = 3
+        step = 4
         alreadyAsked = true
         prefs.edit()
-            .putInt("step", 3)
+            .putInt("step", 4)
             .putBoolean("asked", true)
             .apply()
     }
@@ -1131,18 +1124,16 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
     val postNotifPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted: Boolean ->
-        notifGranted = granted
+        notifGranted = granted || hasNotifPermission()
         step = maxOf(step, 1)
         prefs.edit().putInt("step", step).apply()
 
-        if (!granted) {
+        if (!notifGranted) {
             ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean("master_notifications_enabled", false)
                 .apply()
-
             finishStartupPermissionFlow()
-            return@rememberLauncherForActivityResult
         }
     }
 
@@ -1151,23 +1142,16 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         action: () -> Unit,
         onSkip: (() -> Unit)? = null
     ) {
-        hostActivity?.showPermissionIntroThenRequest(
-            permission = permission,
-            requestAction = action,
-            onSkip = onSkip
-        ) ?: action()
+        // Runtime permissions must use only the Android system permission popup.
+        // No custom app permission intro dialog before requesting.
+        action()
     }
-
-    var showExactAlarmDialog by remember { mutableStateOf(false) }
-    var showOemBgDialog by remember { mutableStateOf(false) }
-    var showBatteryOptDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         showWelcomeGuide = shouldShowWelcomeGuide(ctx)
         showUpdateGuide = shouldShowUpdateGuide(ctx)
     }
 
-    // ✅ Startup flow
     LaunchedEffect(alreadyAsked, step, notifGranted, exactAlarmGranted) {
         if (alreadyAsked) {
             showWelcomeGuide = shouldShowWelcomeGuide(ctx)
@@ -1175,218 +1159,74 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
             return@LaunchedEffect
         }
 
-        // STEP 0: Notifications (Android 13+)
         if (step < 1) {
-            // Android 13+: request permission
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                 ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) {
-                requestPermissionWithIntro(
-                    permission = Manifest.permission.POST_NOTIFICATIONS,
-                    action = {
-                        postNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    },
-                    onSkip = {
-                        finishStartupPermissionFlow()
-                    }
-                )
+                postNotifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 return@LaunchedEffect
             }
 
-            // All versions: if app notifications are OFF, ask user to enable in Settings
             if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) {
-                showNotifSettingsDialog = true
+                ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean("master_notifications_enabled", false)
+                    .apply()
                 step = 1
                 prefs.edit().putInt("step", step).apply()
-            } else {
-                step = 1
-                prefs.edit().putInt("step", step).apply()
+                try {
+                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    ctx.startActivity(intent)
+                } catch (_: Throwable) {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", ctx.packageName, null)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    ctx.startActivity(intent)
+                }
+                return@LaunchedEffect
             }
+
+            step = 1
+            prefs.edit().putInt("step", step).apply()
         }
 
-        // STEP 1: Exact Alarm (Android 12+)
         if (step < 2) {
             if (needsExactAlarm && !exactAlarmGranted) {
-                showExactAlarmDialog = true
+                step = 2
+                prefs.edit().putInt("step", step).apply()
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        ctx.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM))
+                    }
+                } catch (_: Throwable) {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", ctx.packageName, null)
+                    }
+                    ctx.startActivity(intent)
+                }
                 return@LaunchedEffect
             }
-            // exact alarm not needed / already granted
             step = 2
             prefs.edit().putInt("step", step).apply()
         }
 
-        // STEP 2: OEM background/autostart guidance (Xiaomi / OPPO / realme)
         if (step < 3) {
-            if (isMiui() || isColorOsOrRealmeUi()) {
-                showOemBgDialog = true
-                return@LaunchedEffect
-            }
             step = 3
             prefs.edit().putInt("step", step).apply()
         }
 
-        // STEP 3: Battery optimization guidance (show only once)
         if (step < 4) {
-            showBatteryOptDialog = true
-            return@LaunchedEffect
+            finishStartupPermissionFlow()
         }
 
-        // ✅ All permission steps finished
-        prefs.edit()
-            .putBoolean("asked", true)
-            .putInt("step", 4)
-            .apply()
-
-        alreadyAsked = true
         showWelcomeGuide = shouldShowWelcomeGuide(ctx)
         showUpdateGuide = shouldShowUpdateGuide(ctx)
-
-        // Test notification dialog disabled (user requested)
     }
 
-    if (showExactAlarmDialog && !alreadyAsked) {
-        AlertDialog(
-            onDismissRequest = { showExactAlarmDialog = false },
-            title = { Text("Allow exact alarms") },
-            text = {
-                Text(
-                    "To show bus time notifications reliably, please allow Exact Alarms. " +
-                        "This helps the app trigger notifications at the correct time."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showExactAlarmDialog = false
-                        step = 2
-                        prefs.edit().putInt("step", step).apply()
-                        try {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                ctx.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM))
-                            }
-                        } catch (_: Throwable) {
-                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = Uri.fromParts("package", ctx.packageName, null)
-                            }
-                            ctx.startActivity(intent)
-                        }
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Open settings") }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showExactAlarmDialog = false
-                        step = 2
-                        prefs.edit().putInt("step", step).apply()
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Not now") }
-            }
-        )
-    }
-
-    if (showOemBgDialog && !alreadyAsked) {
-        val oemTitle = when {
-            isMiui() -> "Allow background running (MIUI)"
-            isRealme() -> "Allow background running (realme UI)"
-            else -> "Allow background running (ColorOS)"
-        }
-
-        val oemText = when {
-            isMiui() ->
-                "To receive bus notifications reliably, please allow:\n\n" +
-                    "• Autostart\n" +
-                    "• No battery restrictions\n" +
-                    "• Allow background activity"
-            else ->
-                "To receive bus notifications reliably, please allow:\n\n" +
-                    "• Auto-launch / Startup manager\n" +
-                    "• Run in background\n" +
-                    "• No battery restrictions"
-        }
-
-        AlertDialog(
-            onDismissRequest = { showOemBgDialog = false },
-            title = { Text(oemTitle) },
-            text = { Text(oemText) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showOemBgDialog = false
-                        if (isMiui()) {
-                            openMiuiBatterySettings(ctx)
-                        } else {
-                            openOppoRealmeAutoStartSettings(ctx)
-                        }
-                        // mark step done so we don't block the app
-                        step = 3
-                        prefs.edit().putInt("step", step).apply()
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Open settings") }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showOemBgDialog = false
-                        step = 3
-                        prefs.edit().putInt("step", step).apply()
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Not now") }
-            }
-        )
-    }
-
-    if (showBatteryOptDialog && !alreadyAsked) {
-        AlertDialog(
-            onDismissRequest = { showBatteryOptDialog = false },
-            title = { Text("Disable battery optimization") },
-            text = {
-                Text(
-                    "Some phones may delay reminders to save battery. " +
-                        "To make schedule notifications reliable, please allow the app to ignore battery optimizations."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showBatteryOptDialog = false
-
-                        // IMPORTANT: mark flow finished
-                        step = 4
-                        prefs.edit()
-                            .putInt("step", 4)
-                            .putBoolean("asked", true)
-                            .apply()
-
-                        alreadyAsked = true
-
-                        openIgnoreBatteryOptimizationsSettings(ctx)
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Open settings") }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showBatteryOptDialog = false
-
-                        step = 4
-                        prefs.edit()
-                            .putInt("step", 4)
-                            .putBoolean("asked", true)
-                            .apply()
-
-                        alreadyAsked = true
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Not now") }
-            }
-        )
-    }
 
     if (showWelcomeGuide) {
         AppFeatureGuideDialog(
@@ -1408,76 +1248,6 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         )
     }
 
-    // Test notification dialog permanently disabled
-
-    // Show dialog to prompt user to enable notifications in settings if denied after first run
-    if (showNotifSettingsDialog) {
-        AlertDialog(
-            onDismissRequest = { showNotifSettingsDialog = false },
-            title = { Text("Enable notifications") },
-            text = {
-                Text(
-                    "Notifications are turned off for this app, so schedule reminders won’t show. " +
-                        "Please enable notifications in Settings."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showNotifSettingsDialog = false
-                        ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
-                            .edit()
-                            .putBoolean("master_notifications_enabled", false)
-                            .apply()
-                        if (!alreadyAsked) {
-                            step = maxOf(step, 1)
-                            prefs.edit().putInt("step", step).apply()
-                        }
-                        try {
-                            val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            ctx.startActivity(intent)
-                        } catch (_: Throwable) {
-                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = Uri.fromParts("package", ctx.packageName, null)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            ctx.startActivity(intent)
-                        }
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Open settings") }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showNotifSettingsDialog = false
-                        ctx.getSharedPreferences("notice_alert_prefs", Context.MODE_PRIVATE)
-                            .edit()
-                            .putBoolean("master_notifications_enabled", false)
-                            .apply()
-                        if (!alreadyAsked) {
-                            finishStartupPermissionFlow()
-                        }
-                    },
-                    colors = ButtonDefaults.textButtonColors(contentColor = ComposeColor.White)
-                ) { Text("Not now") }
-            }
-        )
-    }
-
-    // --- Location permission requests (EXAMPLES) ---
-    // Example: wrap direct location permission launches with requestPermissionWithIntro
-    // Replace:
-    // someLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-    // with:
-    // requestPermissionWithIntro(Manifest.permission.ACCESS_FINE_LOCATION) {
-    //     someLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-    // }
-    // For coarse location, also use Manifest.permission.ACCESS_FINE_LOCATION as the intro key.
-    // For multiple-permission launches (fine+coarse), wrap the array launch similarly.
 }
 
 private class HomeVmFactory(

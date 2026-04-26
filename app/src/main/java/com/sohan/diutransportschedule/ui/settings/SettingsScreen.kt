@@ -24,7 +24,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -37,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -119,7 +119,8 @@ import com.sohan.diutransportschedule.notifications.resetAlarmStateForNotifyTime
 import com.sohan.diutransportschedule.ui.home.HomeViewModel
 import com.sohan.diutransportschedule.ui.home.RouteOption
 import com.sohan.diutransportschedule.ui.map.SelectedRoadStore
-import com.sohan.diutransportschedule.ui.theme.*
+import com.sohan.diutransportschedule.ui.theme.CardSurfaceLight
+import com.sohan.diutransportschedule.ui.theme.TimeChipBorderLight
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -135,7 +136,6 @@ import java.nio.charset.StandardCharsets
 import java.time.DayOfWeek
 import java.time.LocalDate
 import kotlin.math.ln
-import androidx.compose.foundation.layout.offset
 
 private fun ColorScheme.surfaceColorAtElevationCompat(elevation: Dp): Color {
     if (elevation == 0.dp) return surface
@@ -257,6 +257,14 @@ fun ProfileScreen(vm: HomeViewModel) {
     var alarmSound5mEnabled by rememberSaveable {
         mutableStateOf(alertPrefs.getBoolean("alarm_sound_5m", false))
     }
+    val hasInitializedAlarmVibrate5m = alertPrefs.getBoolean("alarm_vibrate_5m_initialized", false)
+    if (!hasInitializedAlarmVibrate5m) {
+        alertPrefs.edit()
+            .putBoolean("alarm_vibrate_5m", true)
+            .putBoolean("alarm_vibrate_5m_initialized", true)
+            .apply()
+    }
+
     var alarmVibrate5mEnabled by rememberSaveable {
         mutableStateOf(alertPrefs.getBoolean("alarm_vibrate_5m", true))
     }
@@ -315,9 +323,9 @@ fun ProfileScreen(vm: HomeViewModel) {
                 )
             } else {
                 vm.setNotificationsEnabled(true)
-                alarmVibrate5mEnabled = true
-                alertPrefs.edit().putBoolean("master_notifications_enabled", true)
-                    .putBoolean("alarm_vibrate_5m", true).apply()
+                alertPrefs.edit()
+                    .putBoolean("master_notifications_enabled", true)
+                    .apply()
                 showToggleMessage("Notifications enabled")
             }
         } else {
@@ -338,12 +346,9 @@ fun ProfileScreen(vm: HomeViewModel) {
         if (notificationsEnabled && (!osOk || !routeAllowsMasterNotificationsToday)) {
             vm.setNotificationsEnabled(false)
         }
-        val ed = alertPrefs.edit().putBoolean("master_notifications_enabled", persist)
-        if (persist) {
-            ed.putBoolean("alarm_vibrate_5m", true)
-            alarmVibrate5mEnabled = true
-        }
-        ed.apply()
+        alertPrefs.edit()
+            .putBoolean("master_notifications_enabled", persist)
+            .apply()
     }
 
     var customRingtoneUri by rememberSaveable {
@@ -358,8 +363,7 @@ fun ProfileScreen(vm: HomeViewModel) {
                 ?: appDefaultRingtoneName
         )
     }
-    val hasPickedCustomFile =
-        !customRingtoneUri.isNullOrBlank() && customRingtoneUri != appDefaultRingtoneUri && customRingtoneName != appDefaultRingtoneName
+    !customRingtoneUri.isNullOrBlank() && customRingtoneUri != appDefaultRingtoneUri && customRingtoneName != appDefaultRingtoneName
     var showRingtonePickerPage by rememberSaveable { mutableStateOf(false) }
     var showRouteSelectionPage by rememberSaveable { mutableStateOf(false) }
     var showNotificationSettingsPage by rememberSaveable { mutableStateOf(false) }
@@ -1532,13 +1536,10 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                                 ) {
                                                                     vm.setNotificationsEnabled(true)
                                                                     vm.notificationsEnabled.first { it }
-                                                                    alarmVibrate5mEnabled = true
                                                                     alarmSound5mEnabled = false
                                                                     alertPrefs.edit().putBoolean(
                                                                         "master_notifications_enabled",
                                                                         true
-                                                                    ).putBoolean(
-                                                                        "alarm_vibrate_5m", true
                                                                     ).putBoolean(
                                                                         "alarm_sound_5m", false
                                                                     ).apply()
@@ -1772,16 +1773,17 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                                 ) {
                                                                     vm.setNotificationsEnabled(true)
                                                                     vm.notificationsEnabled.first { it }
-                                                                    alarmVibrate5mEnabled = true
                                                                     alarmSound5mEnabled = false
-                                                                    alertPrefs.edit().putBoolean(
-                                                                        "master_notifications_enabled",
-                                                                        true
-                                                                    ).putBoolean(
-                                                                        "alarm_vibrate_5m", true
-                                                                    ).putBoolean(
-                                                                        "alarm_sound_5m", false
-                                                                    ).apply()
+                                                                    alertPrefs.edit()
+                                                                        .putBoolean(
+                                                                            "master_notifications_enabled",
+                                                                            true
+                                                                        )
+                                                                        .putBoolean(
+                                                                            "alarm_sound_5m",
+                                                                            false
+                                                                        )
+                                                                        .apply()
                                                                 }
                                                             }
                                                         })
@@ -1916,22 +1918,22 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             )
                                                         } else if (hasNotificationPermissionNow()) {
                                                             vm.setNotificationsEnabled(true)
-
-                                                            alarmVibrate5mEnabled = true
                                                             alarmSound5mEnabled =
                                                                 alertPrefs.getBoolean(
                                                                     "alarm_sound_5m", false
                                                                 )
 
-                                                            alertPrefs.edit().putBoolean(
-                                                                "master_notifications_enabled",
-                                                                true
-                                                            ).putBoolean(
-                                                                "alarm_vibrate_5m", true
-                                                            ).putBoolean(
-                                                                "alarm_sound_5m",
-                                                                alarmSound5mEnabled
-                                                            ).apply()
+                                                            alertPrefs.edit()
+                                                                .putBoolean(
+                                                                    "master_notifications_enabled",
+                                                                    true
+                                                                )
+                                                                .putBoolean(
+                                                                    "alarm_sound_5m",
+                                                                    alarmSound5mEnabled
+                                                                )
+                                                                .apply()
+
                                                             showToggleMessage("Notifications enabled")
                                                         } else {
                                                             vm.setNotificationsEnabled(false)
@@ -1941,13 +1943,9 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                             ).apply()
 
                                                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                                                hostActivity?.showPermissionIntroThenRequest(
-                                                                    permission = Manifest.permission.POST_NOTIFICATIONS,
-                                                                    requestAction = {
-                                                                        notificationPermissionLauncher.launch(
-                                                                            Manifest.permission.POST_NOTIFICATIONS
-                                                                        )
-                                                                    })
+                                                                notificationPermissionLauncher.launch(
+                                                                    Manifest.permission.POST_NOTIFICATIONS
+                                                                )
                                                             } else {
                                                                 try {
                                                                     val intent =
@@ -2010,7 +2008,8 @@ fun ProfileScreen(vm: HomeViewModel) {
                                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                                 Text(
                                                     text = run {
-                                                        val minutes = notifyLeadMinutesDraft.toInt().coerceIn(5, 120)
+                                                        val minutes = notifyLeadMinutesDraft.toInt()
+                                                            .coerceIn(5, 120)
                                                         if (minutes >= 60) {
                                                             val hours = minutes / 60
                                                             val remainingMinutes = minutes % 60
@@ -2208,7 +2207,9 @@ fun ProfileScreen(vm: HomeViewModel) {
                                                         Spacer(Modifier.height(4.dp))
 
                                                         Column(
-                                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                                            verticalArrangement = Arrangement.spacedBy(
+                                                                2.dp
+                                                            )
                                                         ) {
                                                             Text(
                                                                 text = customRingtoneName,

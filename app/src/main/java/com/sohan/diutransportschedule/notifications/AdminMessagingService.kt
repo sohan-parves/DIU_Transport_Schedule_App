@@ -1,32 +1,36 @@
 package com.sohan.diutransportschedule.notifications
 
-import android.util.Log
-import android.graphics.BitmapFactory
-import com.google.firebase.messaging.FirebaseMessaging
-
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.content.Context
-import android.os.Build
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
-import com.google.firebase.messaging.FirebaseMessagingService
-import com.google.firebase.messaging.RemoteMessage
-import com.sohan.diutransportschedule.R
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import android.Manifest
-import android.content.pm.PackageManager
+import com.google.firebase.messaging.FirebaseMessaging
+import com.google.firebase.messaging.FirebaseMessagingService
+import com.google.firebase.messaging.RemoteMessage
 import com.sohan.diutransportschedule.MainActivity
+import com.sohan.diutransportschedule.R
 import com.sohan.diutransportschedule.ui.notice.cacheNoticeFromPush
 import com.sohan.diutransportschedule.ui.notice.registerNoticePushForHomePopup
-
+import android.net.Uri
 const val ACTION_NEW_NOTICE = "com.sohan.diutransportschedule.ACTION_NEW_NOTICE"
 
 class AdminMessagingService : FirebaseMessagingService() {
+    override fun onCreate() {
+        super.onCreate()
+        ensureAdminNotificationChannel(applicationContext)
+        FirebaseMessaging.getInstance().subscribeToTopic("diu_admin")
+        FirebaseMessaging.getInstance().subscribeToTopic("diu_transport")
+    }
     // onMessageReceived(remoteMessage: RemoteMessage) -- removed duplicate, logic merged below
 
     override fun onNewToken(token: String) {
@@ -34,8 +38,23 @@ class AdminMessagingService : FirebaseMessagingService() {
         // Keep topic subscription after token refresh
         FirebaseMessaging.getInstance()
             .subscribeToTopic("diu_admin")
+            .addOnFailureListener {
+                Log.w(
+                    "FCM",
+                    "Failed to subscribe diu_admin after token refresh",
+                    it
+                )
+            }
         FirebaseMessaging.getInstance()
             .subscribeToTopic("diu_transport")
+            .addOnFailureListener {
+                Log.w(
+                    "FCM",
+                    "Failed to subscribe diu_transport after token refresh",
+                    it
+                )
+            }
+        ensureAdminNotificationChannel(applicationContext)
         Log.d("FCM", "New FCM token: $token")
     }
 
@@ -47,7 +66,10 @@ class AdminMessagingService : FirebaseMessagingService() {
             ?: message.notification?.tag
             ?: ""
         val type = rawType.trim()
-        Log.d("FCM", "onMessageReceived: type=$type data=${message.data} notifTitle=${message.notification?.title} notifBody=${message.notification?.body}")
+        Log.d(
+            "FCM",
+            "onMessageReceived: type=$type data=${message.data} notifTitle=${message.notification?.title} notifBody=${message.notification?.body}"
+        )
 
         val nowMs = System.currentTimeMillis()
 
@@ -61,6 +83,7 @@ class AdminMessagingService : FirebaseMessagingService() {
                     message.data["notice_title"],
                     message.notification?.title
                 ) ?: "Transport Notice"
+
             else ->
                 firstNonBlank(
                     message.notification?.title,
@@ -81,6 +104,7 @@ class AdminMessagingService : FirebaseMessagingService() {
                     message.data["text"],
                     message.notification?.body
                 ).orEmpty()
+
             else ->
                 firstNonBlank(
                     message.notification?.body,
@@ -97,6 +121,7 @@ class AdminMessagingService : FirebaseMessagingService() {
         if (!canShowSystemNotification) {
             Log.w("FCM", "FCM received but body is blank; skipping system notification")
         }
+        ensureAdminNotificationChannel(applicationContext)
 
 
         if (looksLikeNotice && body.isNotBlank()) {
@@ -195,7 +220,10 @@ class AdminMessagingService : FirebaseMessagingService() {
             val openNoticeScreen = looksLikeNotice
             val nmCompat = NotificationManagerCompat.from(applicationContext)
             if (!nmCompat.areNotificationsEnabled()) {
-                Log.w("FCM", "Notifications are disabled for this app; skipping system notification")
+                Log.w(
+                    "FCM",
+                    "Notifications are disabled for this app; skipping system notification"
+                )
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val granted = ContextCompat.checkSelfPermission(
                     applicationContext,
@@ -249,7 +277,14 @@ class AdminMessagingService : FirebaseMessagingService() {
         if (data["messageType"]?.equals("notice", ignoreCase = true) == true) return true
 
         // Common backend aliases for type=notice
-        for (key in listOf("ntf_type", "event", "kind", "payload_type", "notice_type", "msg_type")) {
+        for (key in listOf(
+            "ntf_type",
+            "event",
+            "kind",
+            "payload_type",
+            "notice_type",
+            "msg_type"
+        )) {
             if (data[key]?.equals("notice", ignoreCase = true) == true) return true
         }
 
@@ -264,8 +299,7 @@ class AdminMessagingService : FirebaseMessagingService() {
             val nb = message.notification!!.body
             if (!nb.isNullOrBlank()) {
                 val tag = message.notification!!.tag?.trim().orEmpty()
-                if (tag.equals("admin_popup_only", ignoreCase = true)) return false
-                return true
+                return !tag.equals("admin_popup_only", ignoreCase = true)
             }
         }
 
@@ -294,21 +328,17 @@ class AdminMessagingService : FirebaseMessagingService() {
 
         val notifPrefs = appContext.getSharedPreferences("notice_alert_prefs", MODE_PRIVATE)
         val vibrationEnabled = notifPrefs.getBoolean("master_notifications_enabled", true) &&
-            notifPrefs.getBoolean("alarm_vibrate_5m", true)
+                notifPrefs.getBoolean("alarm_vibrate_5m", true)
 
-        // Android 8+ channel
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = appContext.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-
             val existing = nm.getNotificationChannel(ADMIN_MSG_CHANNEL_ID)
 
-            // Ensure this channel is configured for heads-up + vibration.
-            // (Channel sound/vibration/importance are immutable once created.)
             val needsRecreate = existing != null && (
-                existing.importance < NotificationManager.IMPORTANCE_HIGH ||
-                existing.sound != null ||
-                existing.shouldVibrate() != vibrationEnabled
-            )
+                    existing.importance < NotificationManager.IMPORTANCE_HIGH ||
+                            existing.sound != null ||
+                            existing.shouldVibrate() != vibrationEnabled
+                    )
             if (needsRecreate) {
                 try {
                     nm.deleteNotificationChannel(ADMIN_MSG_CHANNEL_ID)
@@ -350,27 +380,12 @@ class AdminMessagingService : FirebaseMessagingService() {
                 4001,
                 openIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or
-                    (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
             )
         } else null
 
-        val originalLargeIcon = try {
-            androidx.core.content.ContextCompat.getDrawable(appContext, com.sohan.diutransportschedule.R.mipmap.ic_launcher_round)?.let { drawable ->
-                val bitmap = android.graphics.Bitmap.createBitmap(
-                    drawable.intrinsicWidth.coerceAtLeast(192),
-                    drawable.intrinsicHeight.coerceAtLeast(192),
-                    android.graphics.Bitmap.Config.ARGB_8888
-                )
-                val canvas = android.graphics.Canvas(bitmap)
-                drawable.setBounds(0, 0, canvas.width, canvas.height)
-                drawable.draw(canvas)
-                bitmap
-            }
-        } catch (_: Exception) { null }
-
         val builder = NotificationCompat.Builder(appContext, ADMIN_MSG_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_fcm_status)
-            .setLargeIcon(originalLargeIcon)
             .setContentTitle(title)
             .setContentText(body)
             .setTicker(title)
@@ -379,12 +394,14 @@ class AdminMessagingService : FirebaseMessagingService() {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
+            .setShowWhen(true)
+            .setWhen(System.currentTimeMillis())
+            .setOnlyAlertOnce(false)
 
         if (pending != null) {
             builder.setContentIntent(pending)
             builder.setFullScreenIntent(pending, false)
         }
-        builder.setOnlyAlertOnce(false)
 
         if (vibrationEnabled) {
             builder.setVibrate(longArrayOf(0, 250, 180, 250))
@@ -394,15 +411,58 @@ class AdminMessagingService : FirebaseMessagingService() {
             builder.setDefaults(0)
         }
 
-        val notif = builder.build()
-
         NotificationManagerCompat.from(appContext)
-            .notify((title + body).hashCode(), notif)
+            .notify((title + body).hashCode(), builder.build())
+    }
+
+    private fun ensureAdminNotificationChannel(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+        val appContext = context.applicationContext
+        val notifPrefs = appContext.getSharedPreferences("notice_alert_prefs", MODE_PRIVATE)
+        val vibrationEnabled = notifPrefs.getBoolean("master_notifications_enabled", true) &&
+                notifPrefs.getBoolean("alarm_vibrate_5m", true)
+
+        val nm = appContext.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val existing = nm.getNotificationChannel(ADMIN_MSG_CHANNEL_ID)
+
+        val needsRecreate = existing != null && (
+                existing.importance < NotificationManager.IMPORTANCE_HIGH ||
+                        existing.sound != null ||
+                        existing.shouldVibrate() != vibrationEnabled
+                )
+        if (needsRecreate) {
+            try {
+                nm.deleteNotificationChannel(ADMIN_MSG_CHANNEL_ID)
+            } catch (_: Throwable) {
+            }
+        }
+
+        if (!needsRecreate && existing != null) return
+
+        val channel = NotificationChannel(
+            ADMIN_MSG_CHANNEL_ID,
+            "Admin messages",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Transport notices and important admin updates"
+            enableVibration(vibrationEnabled)
+            if (vibrationEnabled) {
+                vibrationPattern = longArrayOf(0, 250, 180, 250)
+            } else {
+                vibrationPattern = longArrayOf(0)
+            }
+            setSound(null, null)
+            setShowBadge(true)
+            lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
+        }
+        nm.createNotificationChannel(channel)
     }
 
     companion object {
         private const val ADMIN_MSG_CHANNEL_ID = "admin_updates"
-        const val ACTION_NEW_ADMIN_MESSAGE = "com.sohan.diutransportschedule.ACTION_NEW_ADMIN_MESSAGE"
+        const val ACTION_NEW_ADMIN_MESSAGE =
+            "com.sohan.diutransportschedule.ACTION_NEW_ADMIN_MESSAGE"
 
         private const val PREF_ADMIN_MESSAGE = "admin_message_popup"
         private const val KEY_ADMIN_MESSAGE_ID = "id"

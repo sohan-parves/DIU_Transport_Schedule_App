@@ -1,49 +1,47 @@
 package com.sohan.diutransportschedule.notifications
 
-import android.media.Ringtone
-import android.media.MediaPlayer
-import android.os.Handler
-import android.os.Looper
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
-import android.os.VibrationAttributes
-
+import android.R
 import android.app.AlarmManager
 import android.app.NotificationManager
-import android.media.AudioAttributes
-import android.media.RingtoneManager
-import android.provider.Settings
-import android.R
-import java.util.Locale
-
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.database.ContentObserver
 import android.graphics.BitmapFactory
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
+import android.os.VibrationAttributes
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.Settings
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.graphics.drawable.IconCompat
+import com.sohan.diutransportschedule.MainActivity
 import com.sohan.diutransportschedule.MainActivity.Companion.ACTION_STOP_SCHEDULE_ALARM
 import com.sohan.diutransportschedule.MainActivity.Companion.ALARM_REQ_CODE
 import com.sohan.diutransportschedule.MainActivity.Companion.EXTRA_TEXT
 import com.sohan.diutransportschedule.MainActivity.Companion.EXTRA_TITLE
+import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_SILENT
 import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_SOUND_ONLY
 import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_SOUND_VIB
-import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_SILENT
 import com.sohan.diutransportschedule.MainActivity.Companion.NOTIF_CHANNEL_ID_VIB_ONLY
-import android.util.Log
-import android.os.SystemClock
-import android.os.PowerManager
-import java.util.concurrent.atomic.AtomicLong
-import android.database.ContentObserver
-import android.media.AudioManager
-import androidx.core.graphics.drawable.IconCompat
-import com.sohan.diutransportschedule.MainActivity
 import com.sohan.diutransportschedule.ensureNotificationChannel
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 private const val ACTION_STOP_RUNNING_ALERT_INTERNAL = "com.sohan.diutransportschedule.notifications.ACTION_STOP_RUNNING_ALERT_INTERNAL"
 private const val ACTION_TAP_OPEN_AND_STOP = "com.sohan.diutransportschedule.notifications.ACTION_TAP_OPEN_AND_STOP"
@@ -230,15 +228,35 @@ object RunningAlertController {
 
     private val screenOffStopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                Intent.ACTION_BOOT_COMPLETED,
+                Intent.ACTION_LOCKED_BOOT_COMPLETED,
+                Intent.ACTION_MY_PACKAGE_REPLACED -> {
+                    Log.d(
+                        "ScheduleAlarmReceiver",
+                        "System restart/package replaced action=${intent.action}; attempting to restore next scheduled alarm"
+                    )
+                    try {
+                        scheduleNextFromStoredQueue(context.applicationContext)
+                    } catch (t: Throwable) {
+                        Log.e(
+                            "ScheduleAlarmReceiver",
+                            "Failed to restore scheduled alarm after restart/update",
+                            t
+                        )
+                    }
+                    return
+                }
+            }
+
             if (
                 intent.action == Intent.ACTION_SCREEN_OFF ||
                 intent.action == Intent.ACTION_SCREEN_ON ||
                 intent.action == Intent.ACTION_USER_PRESENT
-            ) {
+                ) {
                 try {
-                    // Any power-button interaction that turns the screen OFF / ON,
-                    // or unlocks the device, should stop only the running alert.
-                    // Keep the notification visible for manual dismissal.
+                    // Stop the running alert only after the user unlocks/presents the device.
+                    // Do not stop on SCREEN_OFF, otherwise alarms can get cut off while the phone is locked.
                     stop(context.applicationContext)
                 } catch (_: Throwable) {
                 }
@@ -536,7 +554,7 @@ object RunningAlertController {
             }
         } catch (_: Throwable) {
         }
-        
+
         try {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DIUTransport:AlertRingingWakeLock")
@@ -1033,17 +1051,16 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
 
         // Tap on the notification body: stop current alert first, then open the app.
-        val tapIntent = context.packageManager
-            .getLaunchIntentForPackage(context.packageName)
-            ?.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                putExtra("stop_current_alarm", true)
-                data = Uri.parse("diu://tap_open_and_stop/${System.currentTimeMillis()}")
-            }
+        val tapIntent = Intent(context, MainActivity::class.java).apply {
+            this.action = Intent.ACTION_VIEW
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra("stop_current_alarm", true)
+            this.data = Uri.parse("diu://tap_open_and_stop/${System.currentTimeMillis()}")
+        }
 
         val contentPi = PendingIntent.getActivity(
             context,
-            (System.currentTimeMillis() % Int.MAX_VALUE).toInt(),
+            ALARM_REQ_CODE,
             tapIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or
                     (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
@@ -1109,8 +1126,8 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         builder.setContentIntent(contentPi)
         builder.setDeleteIntent(stopPi)
-        // Do not use a full-screen intent here, otherwise some devices auto-open the app.
-        // Heads-up popup will still depend on HIGH/MAX notification importance + priority.
+        // Keep full-screen disabled so the app does not auto-open; HIGH/MAX priority shows the panel.
+        builder.setFullScreenIntent(contentPi, false)
         builder.setTicker(collapsedTitle)
         builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
 
@@ -1196,6 +1213,26 @@ private fun parseQueue(raw: String): List<QueueItem> {
 }
 
 private fun scheduleNextFromStoredQueue(context: Context) {
+    val alertPrefs = context.getSharedPreferences(NOTICE_ALERT_PREFS, Context.MODE_PRIVATE)
+    val masterNotificationsEnabled = alertPrefs.getBoolean("master_notifications_enabled", true)
+    if (!masterNotificationsEnabled) {
+        try {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val nextAlarmIntent = Intent(context, ScheduleAlarmReceiver::class.java)
+            val nextAlarmPi = PendingIntent.getBroadcast(
+                context,
+                ALARM_REQ_CODE,
+                nextAlarmIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                        (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+            )
+            alarmManager.cancel(nextAlarmPi)
+            nextAlarmPi.cancel()
+        } catch (_: Throwable) {
+        }
+        Log.d("ScheduleAlarmReceiver", "Master notifications OFF — skip restoring alarms from queue")
+        return
+    }
     val prefs = context.getSharedPreferences(MainActivity.Companion.PREF_SCHEDULE_QUEUE, Context.MODE_PRIVATE)
     val raw = prefs.getString(MainActivity.Companion.KEY_SCHEDULE_QUEUE, "").orEmpty()
 

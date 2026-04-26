@@ -19,3 +19,13 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Keep Db and Data Models used by the application
+-keep class com.sohan.diutransportschedule.db.** { *; }
+-keep class com.sohan.diutransportschedule.data.** { *; }
+
+# Keep Notification Models used in schedule handling
+-keep class com.sohan.diutransportschedule.notifications.** { *; }
+
+# Keep ui Home package models that might be used
+-keep class com.sohan.diutransportschedule.ui.home.** { *; }
