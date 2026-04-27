@@ -400,7 +400,6 @@ class AdminMessagingService : FirebaseMessagingService() {
 
         if (pending != null) {
             builder.setContentIntent(pending)
-            builder.setFullScreenIntent(pending, false)
         }
 
         if (vibrationEnabled) {

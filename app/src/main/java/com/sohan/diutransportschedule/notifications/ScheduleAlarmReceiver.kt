@@ -250,7 +250,6 @@ object RunningAlertController {
             }
 
             if (
-                intent.action == Intent.ACTION_SCREEN_OFF ||
                 intent.action == Intent.ACTION_SCREEN_ON ||
                 intent.action == Intent.ACTION_USER_PRESENT
                 ) {
@@ -557,7 +556,8 @@ object RunningAlertController {
 
         try {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DIUTransport:AlertRingingWakeLock")
+            @Suppress("DEPRECATION")
+            wakeLock = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "DIUTransport:AlertRingingWakeLock")
             wakeLock?.acquire(overallDurationMs + 5000L) // +5 sec padding for cleanup
         } catch (t: Throwable) {
             Log.e("ScheduleAlarmReceiver", "Failed to acquire wake lock", t)
@@ -1126,8 +1126,6 @@ class ScheduleAlarmReceiver : BroadcastReceiver() {
 
         builder.setContentIntent(contentPi)
         builder.setDeleteIntent(stopPi)
-        // Keep full-screen disabled so the app does not auto-open; HIGH/MAX priority shows the panel.
-        builder.setFullScreenIntent(contentPi, false)
         builder.setTicker(collapsedTitle)
         builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
 

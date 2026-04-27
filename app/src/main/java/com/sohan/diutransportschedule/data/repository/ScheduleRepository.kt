@@ -102,11 +102,33 @@ class ScheduleRepository(
     suspend fun syncIfNeeded(
         allowDataRead: Boolean = true,
         forceReadOnVersionChange: Boolean = false,
-        forceMetaCheckOnly: Boolean = false
+        forceMetaCheckOnly: Boolean = false,
+        context: android.content.Context? = null
     ): SyncResult {
         val meta = readRemoteMeta()
         val remoteVersion = meta.version
         val message = meta.message
+
+        if (context != null) {
+            try {
+                val mapMeta = fs.collection("meta").document("route_maps").get().await()
+                val remoteMapVersion = (mapMeta.getLong("version") ?: 0L).toLong()
+                
+                if (remoteMapVersion > 0L) {
+                    val prefs = context.getSharedPreferences("map_route_cache", android.content.Context.MODE_PRIVATE)
+                    val localMapVersion = prefs.getLong("map_cache_version", 0L)
+                    
+                    if (remoteMapVersion != localMapVersion) {
+                        val editor = prefs.edit()
+                        prefs.all.keys.filter { it.startsWith("route_cache_") }.forEach { editor.remove(it) }
+                        editor.putLong("map_cache_version", remoteMapVersion)
+                        editor.apply()
+                    }
+                }
+            } catch (_: Throwable) {
+                // Ignore map sync failures to not interrupt schedule sync
+            }
+        }
 
         val localVersion = store.getLocalVersion()
         val updated = remoteVersion > localVersion

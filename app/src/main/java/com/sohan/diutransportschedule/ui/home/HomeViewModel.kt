@@ -464,13 +464,14 @@ class HomeViewModel(
             try {
                 val res = withContext(Dispatchers.IO) {
                     if (!allowRemoteRead) {
-                        repo.syncIfNeeded(allowDataRead = false)
+                        repo.syncIfNeeded(allowDataRead = false, context = context)
                     } else {
                         withTimeoutOrNull(4_000L) {
                             repo.syncIfNeeded(
                                 allowDataRead = !hasLocalData,
                                 forceReadOnVersionChange = true,
-                                forceMetaCheckOnly = hasLocalData
+                                forceMetaCheckOnly = hasLocalData,
+                                context = context
                             )
                         }
                     }
