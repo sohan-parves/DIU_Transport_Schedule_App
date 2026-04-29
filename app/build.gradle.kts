@@ -14,8 +14,8 @@ android {
         applicationId = "com.sohan.diutransportschedule"
         minSdk = 30
         targetSdk = 36
-        versionCode = 50
-        versionName = "1.5.5.10"
+        versionCode = 52
+        versionName = "1.5.5.12"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

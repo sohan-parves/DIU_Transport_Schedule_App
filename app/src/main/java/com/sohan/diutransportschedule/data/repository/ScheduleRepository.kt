@@ -53,14 +53,23 @@ class ScheduleRepository(
     }
 
     private suspend fun readRemoteMeta(): SyncResult {
-        val meta = fs.collection("meta").document("app").get().await()
-        val remoteVersion = (
-                meta.getLong("scheduleVersion")
-                    ?: meta.getLong("version")
-                    ?: 0L
-                ).toInt()
-        val message = meta.getString("message") ?: ""
-        return SyncResult(updated = false, version = remoteVersion, message = message)
+        var lastException: Throwable? = null
+        for (i in 0 until 3) {
+            try {
+                val meta = fs.collection("meta").document("app").get(com.google.firebase.firestore.Source.SERVER).await()
+                val remoteVersion = (
+                        meta.getLong("scheduleVersion")
+                            ?: meta.getLong("version")
+                            ?: 0L
+                        ).toInt()
+                val message = meta.getString("message") ?: ""
+                return SyncResult(updated = false, version = remoteVersion, message = message)
+            } catch (e: Throwable) {
+                lastException = e
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        throw lastException ?: Exception("Failed to fetch meta/app")
     }
 
     private suspend fun remoteMetaVersion(): Int = readRemoteMeta().version
@@ -111,8 +120,17 @@ class ScheduleRepository(
 
         if (context != null) {
             try {
-                val mapMeta = fs.collection("meta").document("route_maps").get().await()
-                val remoteMapVersion = (mapMeta.getLong("version") ?: 0L).toLong()
+                var remoteMapVersion = 0L
+                for (i in 0 until 3) {
+                    try {
+                        val mapMeta = fs.collection("meta").document("route_maps").get(com.google.firebase.firestore.Source.SERVER).await()
+                        remoteMapVersion = (mapMeta.getLong("version") ?: 0L).toLong()
+                        if (remoteMapVersion > 0L) break
+                    } catch (e: Throwable) {
+                        if (i == 2 && remoteMapVersion == 0L) throw e
+                        kotlinx.coroutines.delay(1000)
+                    }
+                }
                 
                 if (remoteMapVersion > 0L) {
                     val prefs = context.getSharedPreferences("map_route_cache", android.content.Context.MODE_PRIVATE)
@@ -123,6 +141,19 @@ class ScheduleRepository(
                         prefs.all.keys.filter { it.startsWith("route_cache_") }.forEach { editor.remove(it) }
                         editor.putLong("map_cache_version", remoteMapVersion)
                         editor.apply()
+                        
+                        for (i in 0 until 3) {
+                            try {
+                                fs.collection("route_maps")
+                                    .document("current")
+                                    .collection("routes")
+                                    .get(com.google.firebase.firestore.Source.SERVER).await()
+                                break
+                            } catch (e: Throwable) {
+                                if (i == 2) throw e
+                                kotlinx.coroutines.delay(1000)
+                            }
+                        }
                     }
                 }
             } catch (_: Throwable) {
@@ -158,13 +189,27 @@ class ScheduleRepository(
             return SyncResult(updated = false, version = remoteVersion, message = message)
         }
 
-        val doc = fs.collection("schedules")
-            .document("current")
-            .collection("data")
-            .document("items")
-            .get().await()
-
-        val raw = doc.get("items") as? List<Map<String, Any?>> ?: emptyList()
+        var raw: List<Map<String, Any?>> = emptyList()
+        var fetchSuccess = false
+        for (i in 0 until 3) {
+            try {
+                val doc = fs.collection("schedules")
+                    .document("current")
+                    .collection("data")
+                    .document("items")
+                    .get(com.google.firebase.firestore.Source.SERVER).await()
+                raw = doc.get("items") as? List<Map<String, Any?>> ?: emptyList()
+                fetchSuccess = true
+                break
+            } catch (e: Throwable) {
+                if (i == 2) throw e
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        
+        if (!fetchSuccess) {
+            return SyncResult(updated = false, version = localVersion, message = message)
+        }
         fun isValidRouteNo(rn: String): Boolean {
             val s = rn.trim()
             if (s.isBlank()) return false

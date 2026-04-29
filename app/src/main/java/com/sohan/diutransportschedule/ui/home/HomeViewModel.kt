@@ -102,9 +102,9 @@ class HomeViewModel(
     private fun currentFirestoreWindowSlot(): Int {
         val hour = LocalTime.now().hour
         return when {
-            hour in 5..11 -> 1   // Morning
-            hour in 12..16 -> 2  // Noon
-            hour in 17..23 -> 3  // Evening
+            hour in 5..11 -> 1   // Morning: 5:00 AM - 11:59 AM
+            hour in 12..16 -> 2  // Noon: 12:00 PM - 4:59 PM
+            hour in 17..21 -> 3  // Evening: 5:00 PM - 10:00 PM (technically 9:59 PM if we use 21)
             else -> 0            // Night: no read
         }
     }

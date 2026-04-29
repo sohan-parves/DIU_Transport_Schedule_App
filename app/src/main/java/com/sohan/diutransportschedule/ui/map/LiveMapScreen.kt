@@ -1179,7 +1179,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
 
     fun startDownload(forceRestart: Boolean = false, allowWhileReady: Boolean = false) {
         val mapId = "dhaka_transport"
-        val url = "https://sohanparves.unaux.com/diu/maps/dhaka_transport_${style}.mbtiles"
+        val url = "https://github.com/sohan-parves/DIUtransportschedule/releases/download/v1.0.0/dhaka_transport_light.mbtiles"
         val uniqueWorkName = "mbtiles_route_${mapId}_$style"
 
         if (!forceRestart) {
@@ -1287,8 +1287,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
             lastDoneBytes = 0L
             lastTotalBytes = -1L
             mapVersionLabel = ""
-            checkingForMapUpdates = true
-            startDownload(forceRestart = false, allowWhileReady = true)
+            checkingForMapUpdates = false
             return@LaunchedEffect
         }
 
