@@ -8,7 +8,6 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -27,8 +26,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.sohan.diutransportschedule.BuildConfig
 import com.sohan.diutransportschedule.ui.notice.checkAndSyncNoticesFromMeta
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -52,9 +49,7 @@ data class RouteOption(
     val label: String
 )
 
-private const val PREF_FIRESTORE_WINDOW = "firestore_window_limit"
-private const val KEY_FIRESTORE_WINDOW_DATE = "window_date"
-private const val KEY_FIRESTORE_WINDOW_SLOT = "window_slot"
+// Slot-based window constants removed — version sync is now FCM-driven
 
 private fun DbScheduleItem.toUi(): UiSchedule = UiSchedule(
     routeNo = routeNo,
@@ -93,25 +88,8 @@ class HomeViewModel(
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
     // Manual remote read window: allow only once every 1 hour for swipe-to-refresh.
-    // Auto refresh uses separate slot-based state and does not share this timestamp.
     private var manualLastRemoteReadAtMillis: Long = 0L
     private val manualRemoteReadIntervalMillis = 60 * 60 * 1000L // 1 hour
-    private val syncMutex = Mutex()
-
-
-    private fun currentFirestoreWindowSlot(): Int {
-        val hour = LocalTime.now().hour
-        return when {
-            hour in 5..11 -> 1   // Morning: 5:00 AM - 11:59 AM
-            hour in 12..16 -> 2  // Noon: 12:00 PM - 4:59 PM
-            hour in 17..21 -> 3  // Evening: 5:00 PM - 10:00 PM (technically 9:59 PM if we use 21)
-            else -> 0            // Night: no read
-        }
-    }
-
-    private fun firestoreWindowPrefs(context: Context?): SharedPreferences? {
-        return context?.getSharedPreferences(PREF_FIRESTORE_WINDOW, Context.MODE_PRIVATE)
-    }
 
     private fun syncFridayRouteFromPrefs(context: Context?) {
         val prefs = context?.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
@@ -168,36 +146,6 @@ class HomeViewModel(
         }
     }
 
-    private fun readAutoLastSlot(context: Context?): Pair<String, Int> {
-        val prefs = firestoreWindowPrefs(context)
-        val date = prefs?.getString(KEY_FIRESTORE_WINDOW_DATE, "") ?: ""
-        val slot = prefs?.getInt(KEY_FIRESTORE_WINDOW_SLOT, -1) ?: -1
-        return date to slot
-    }
-
-    private fun isAutoSlotAvailable(context: Context?): Boolean {
-        val slot = currentFirestoreWindowSlot()
-        if (slot == 0) return false
-
-        val today = LocalDate.now().toString()
-        val (savedDate, savedSlot) = readAutoLastSlot(context)
-        return !(savedDate == today && savedSlot == slot)
-    }
-
-    private fun currentAutoReadableSlotOrNone(): Int {
-        return currentFirestoreWindowSlot()
-    }
-
-    private fun markAutoSlotRead(context: Context?, slot: Int) {
-        if (slot == 0) return
-
-        val prefs = firestoreWindowPrefs(context) ?: return
-        prefs.edit()
-            .putString(KEY_FIRESTORE_WINDOW_DATE, LocalDate.now().toString())
-            .putInt(KEY_FIRESTORE_WINDOW_SLOT, slot)
-            .apply()
-    }
-
     private val _showUpdate = MutableStateFlow(false)
     val showUpdate: StateFlow<Boolean> = _showUpdate.asStateFlow()
 
@@ -214,6 +162,9 @@ class HomeViewModel(
     // prefs
     val selectedRoute: StateFlow<String> = repo.selectedRouteFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "ALL")
+
+    val scheduleUpdatedAtMillis: StateFlow<Long> = repo.scheduleUpdatedAtMillisFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
 
 
     val darkMode: StateFlow<Boolean> = repo.darkModeFlow
@@ -393,6 +344,11 @@ class HomeViewModel(
         _showUpdate.value = true
     }
 
+    fun onScheduleUpdatedFromPush() {
+        _syncStatusMessage.value = "Schedule updated"
+        _initialUiReady.value = true
+    }
+
     private fun hasInternetConnection(context: Context?): Boolean {
         if (context == null) return false
 
@@ -405,6 +361,36 @@ class HomeViewModel(
                 capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
+    // ── Daily meta check ──────────────────────────────────────────────────
+    // Checks if today's date (YYYY-MM-DD) differs from the last successful
+    // auto-check date saved in SharedPreferences.
+    // Returns true  → need to run the remote meta check today.
+    // Returns false → already checked today, skip.
+    private fun isDailyMetaCheckNeeded(context: Context): Boolean {
+        return try {
+            val prefs = context.getSharedPreferences(
+                PREF_DAILY_META_CHECK, Context.MODE_PRIVATE
+            )
+            val stored = prefs.getString(KEY_LAST_DAILY_CHECK_DATE, "").orEmpty()
+            val today = LocalDate.now().toString() // e.g. "2026-05-22"
+            today != stored
+        } catch (_: Throwable) {
+            true // on any error, allow the check
+        }
+    }
+
+    // Called only after a *successful* remote meta read.
+    private fun markDailyMetaCheckDone(context: Context) {
+        try {
+            val today = LocalDate.now().toString()
+            context.getSharedPreferences(PREF_DAILY_META_CHECK, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_DAILY_CHECK_DATE, today)
+                .apply()
+            Log.d("DailyCheck", "Daily meta check marked done for $today")
+        } catch (_: Throwable) {}
+    }
+
     private suspend fun performRefresh(
         showBannerIfUpdated: Boolean,
         allowDataRead: Boolean,
@@ -412,122 +398,137 @@ class HomeViewModel(
         isManualRefresh: Boolean,
         showSyncingUi: Boolean = true
     ) {
-        syncMutex.withLock {
-            if (_isSyncing.value) return
-            _syncStatusMessage.value = ""
-            syncFridayRouteFromPrefs(context)
+        if (_isSyncing.value) return
+        _syncStatusMessage.value = ""
+        syncFridayRouteFromPrefs(context)
 
-            val isAutoRefresh = !isManualRefresh
+        val hasLocalData = try {
+            repo.hasReadableLocalData()
+        } catch (_: Throwable) {
+            false
+        }
+        if (hasLocalData) {
+            _initialUiReady.value = true
+        }
 
-            val hasLocalData = try {
-                repo.hasReadableLocalData()
-            } catch (_: Throwable) {
-                false
-            }
-            if (hasLocalData) {
-                _initialUiReady.value = true
-            }
+        val now = System.currentTimeMillis()
+        val hasInternet = withContext(Dispatchers.IO) {
+            withTimeoutOrNull(if (hasLocalData) 900L else 1500L) {
+                hasInternetConnection(context)
+            } ?: false
+        }
 
-            val now = System.currentTimeMillis()
-            val hasInternet = withContext(Dispatchers.IO) {
-                withTimeoutOrNull(if (hasLocalData) 900L else 1500L) {
-                    hasInternetConnection(context)
-                } ?: false
-            }
-            // First install / empty local DB should bypass time-window gating
-            // so the app can perform a full remote read immediately.
-            val allowFirstInstallFullRead = allowDataRead && hasInternet && !hasLocalData
-            val currentAutoSlot = currentAutoReadableSlotOrNone()
-            val manualWithinReadInterval =
-                now - manualLastRemoteReadAtMillis >= manualRemoteReadIntervalMillis
-            val manualRemoteAllowed = allowFirstInstallFullRead || (hasInternet && manualWithinReadInterval)
+        // Priority 4: cache exists + no network → use cache as-is
+        if (!hasInternet && hasLocalData) {
+            _initialUiReady.value = true
+            _isSyncing.value = false
+            return
+        }
 
-            val autoSlotAvailable = hasInternet && currentAutoSlot != 0 && isAutoSlotAvailable(context)
-            val shouldCheckRemoteForAuto = isAutoRefresh && allowDataRead && autoSlotAvailable
-
-            val autoRemoteAllowed = allowFirstInstallFullRead || shouldCheckRemoteForAuto
-
-            val allowRemoteRead = allowDataRead && when {
-                allowFirstInstallFullRead -> true
-                isManualRefresh -> manualRemoteAllowed
-                else -> autoRemoteAllowed
-            }
-
-
-            if (showSyncingUi) {
-                _isSyncing.value = true
-            }
-            var remoteReadSucceeded = false
-
-            val autoSlotUsedForThisAttempt = currentAutoSlot
-
+        // Existing installs may have local schedule items from before we began
+        // caching Firestore's `updatedAt`. Read it once, without replacing routes.
+        if (hasLocalData && scheduleUpdatedAtMillis.value <= 0L) {
             try {
-                val res = withContext(Dispatchers.IO) {
-                    if (!allowRemoteRead) {
-                        repo.syncIfNeeded(allowDataRead = false, context = context)
-                    } else {
-                        withTimeoutOrNull(4_000L) {
-                            repo.syncIfNeeded(
-                                allowDataRead = !hasLocalData,
-                                forceReadOnVersionChange = true,
-                                forceMetaCheckOnly = hasLocalData,
-                                context = context
-                            )
-                        }
+                withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(4_000L) {
+                        repo.backfillScheduleUpdatedAtIfMissing()
                     }
-                } ?: run {
-                    if (isManualRefresh && _isSyncing.value) {
-                        _syncStatusMessage.value = "Internet connection failed"
-                    }
-                    return@withLock
-                }
-
-                if (allowRemoteRead) {
-                    remoteReadSucceeded = true
-
-                    if (isAutoRefresh) {
-                        syncNoticeMetaWithHomeAutoScan(context)
-                    }
-
-                    if (!hasLocalData) {
-                        val localReadyNow = try {
-                            repo.hasReadableLocalData()
-                        } catch (_: Throwable) {
-                            false
-                        }
-
-                        if (isManualRefresh && !localReadyNow) {
-                            _syncStatusMessage.value = "Schedule data is still loading"
-                        }
-                    }
-                }
-
-                if (res.message.isNotBlank()) _updateMessage.value = res.message
-
-                if (showBannerIfUpdated && showUpdateBanner.value &&
-                    res.updated && repo.shouldShowUpdate(res.version)
-                ) {
-                    _showUpdate.value = true
-                    repo.markSeen(res.version)
                 }
             } catch (_: Throwable) {
+                // Keep the cached schedule usable; retry next time the app is online.
+            }
+        }
+
+        val manualWithinReadInterval =
+            now - manualLastRemoteReadAtMillis >= manualRemoteReadIntervalMillis
+        val manualRemoteAllowed = hasInternet && manualWithinReadInterval
+
+        // Priority 3: cache miss → direct fetch (skip daily version check)
+        val isCacheMiss = !hasLocalData && hasInternet && allowDataRead
+
+        // Priority 2: once-per-day version check when cache exists + network available
+        val needsDailyMetaCheck = !isManualRefresh && hasInternet && hasLocalData &&
+                context != null && isDailyMetaCheckNeeded(context)
+
+        val allowRemoteRead = when {
+            isCacheMiss -> true
+            isManualRefresh -> manualRemoteAllowed
+            needsDailyMetaCheck -> true
+            else -> false
+        }
+
+        if (!allowRemoteRead) {
+            _initialUiReady.value = true
+            return
+        }
+
+        if (showSyncingUi) {
+            _isSyncing.value = true
+        }
+        var remoteReadSucceeded = false
+
+        try {
+            val res = withContext(Dispatchers.IO) {
+                withTimeoutOrNull(if (isCacheMiss) 8_000L else 4_000L) {
+                    when {
+                        isCacheMiss -> repo.syncOnCacheMiss(context)
+                        isManualRefresh || needsDailyMetaCheck ->
+                            repo.syncDailyVersionCheck(context)
+                        else -> repo.syncIfNeeded(allowDataRead = false, context = context)
+                    }
+                }
+            } ?: run {
                 if (isManualRefresh && _isSyncing.value) {
                     _syncStatusMessage.value = "Internet connection failed"
                 }
-            } finally {
+                return
+            }
 
-                if (remoteReadSucceeded) {
-                    val completedAt = System.currentTimeMillis()
-                    if (isManualRefresh) {
-                        manualLastRemoteReadAtMillis = completedAt
-                    } else if (autoSlotUsedForThisAttempt != 0) {
-                        markAutoSlotRead(context, autoSlotUsedForThisAttempt)
-                    }
+            remoteReadSucceeded = true
+
+            if (!isManualRefresh) {
+                syncNoticeMetaWithHomeAutoScan(context)
+            }
+
+            if (isCacheMiss) {
+                val localReadyNow = try {
+                    repo.hasReadableLocalData()
+                } catch (_: Throwable) {
+                    false
                 }
-                _initialUiReady.value = true
-                if (showSyncingUi) {
-                    _isSyncing.value = false
+                if (!localReadyNow && isManualRefresh) {
+                    _syncStatusMessage.value = "Schedule data is still loading"
                 }
+            }
+
+            if (res.updated) {
+                _syncStatusMessage.value = "Schedule updated"
+            }
+
+            if (res.message.isNotBlank()) _updateMessage.value = res.message
+
+            if (showBannerIfUpdated && showUpdateBanner.value &&
+                res.updated && repo.shouldShowUpdate(res.version)
+            ) {
+                _showUpdate.value = true
+                repo.markSeen(res.version)
+            }
+        } catch (_: Throwable) {
+            if (isManualRefresh && _isSyncing.value) {
+                _syncStatusMessage.value = "Internet connection failed"
+            }
+        } finally {
+            if (remoteReadSucceeded) {
+                if (isManualRefresh) {
+                    manualLastRemoteReadAtMillis = System.currentTimeMillis()
+                }
+                if (needsDailyMetaCheck && context != null) {
+                    markDailyMetaCheckDone(context)
+                }
+            }
+            _initialUiReady.value = true
+            if (showSyncingUi) {
+                _isSyncing.value = false
             }
         }
     }
@@ -540,6 +541,55 @@ class HomeViewModel(
                 context = context,
                 isManualRefresh = false
             )
+        }
+    }
+
+    /**
+     * Foreground / online auto-reload: triggered when the app is opened or brought
+     * back to the foreground. Runs the version check (Section 3) only when the
+     * device is online; when offline it leaves the existing cached data untouched
+     * and shows no error. Serialized via the repo mutex + [_isSyncing] guard so it
+     * never overlaps with the background worker or a manual pull-to-refresh.
+     */
+    fun checkForUpdatesOnResume(context: Context?) {
+        if (_isSyncing.value) return
+        viewModelScope.launch {
+            val hasInternet = withContext(Dispatchers.IO) {
+                withTimeoutOrNull(1000L) {
+                    hasInternetConnection(context)
+                } ?: false
+            }
+            if (!hasInternet) {
+                Log.d("ForegroundSync", "Foreground sync skipped — offline, using cached data")
+                return@launch
+            }
+
+            _isSyncing.value = true
+            try {
+                val res = withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(5000L) {
+                        repo.syncDailyVersionCheck(context, trigger = "foreground")
+                    }
+                }
+                if (res?.updated == true) {
+                    _syncStatusMessage.value = "Schedule updated"
+                    _updateMessage.value = res.message
+                }
+            } catch (_: Throwable) {
+                // Old cache kept intact; retry happens on next foreground / background run.
+            } finally {
+                _isSyncing.value = false
+            }
+
+            // Lightweight FCM token re-registration check (silent if up-to-date).
+            context?.let { c ->
+                try {
+                    withContext(Dispatchers.IO) {
+                        com.sohan.diutransportschedule.sync.FcmTokenSync.verifyAndReRegisterIfNeeded(c)
+                    }
+                } catch (_: Throwable) {
+                }
+            }
         }
     }
 
@@ -703,6 +753,11 @@ class HomeViewModel(
                 appliesOn = item.appliesOn
             )
         }
+    }
+
+    companion object {
+        private const val PREF_DAILY_META_CHECK = "daily_meta_check_prefs"
+        private const val KEY_LAST_DAILY_CHECK_DATE = "last_daily_check_date"
     }
 }
 

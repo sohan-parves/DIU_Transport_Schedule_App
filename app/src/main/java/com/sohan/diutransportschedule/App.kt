@@ -9,7 +9,13 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.sohan.diutransportschedule.db.AppDatabase
 import com.sohan.diutransportschedule.prefs.UserPrefs
 import com.sohan.diutransportschedule.data.repository.ScheduleRepository
+import com.sohan.diutransportschedule.sync.FcmTokenSync
 import com.sohan.diutransportschedule.sync.VersionStore
+import com.sohan.diutransportschedule.workers.ScheduleSyncWorker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import org.osmdroid.config.Configuration
 
 class App : Application() {
     lateinit var repo: ScheduleRepository
@@ -17,13 +23,11 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        val prefs = applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
-        val savedDark = when {
-            prefs.contains("dark_mode") -> prefs.getBoolean("dark_mode", false)
-            prefs.contains("dark") -> prefs.getBoolean("dark", false)
-            prefs.contains("darkMode") -> prefs.getBoolean("darkMode", false)
-            else -> true
-        }
+        // Initialize osmdroid configuration
+        Configuration.getInstance().load(this, getSharedPreferences("osmdroid", Context.MODE_PRIVATE))
+        Configuration.getInstance().userAgentValue = packageName
+
+        val savedDark = readSavedDarkMode(applicationContext)
         AppCompatDelegate.setDefaultNightMode(
             if (savedDark) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
         )
@@ -40,6 +44,17 @@ class App : Application() {
             store = VersionStore(this),
             prefs = UserPrefs(this)   // ✅ prefs package এরটা
         )
+
+        // Schedule the ~3×/day background version check (idempotent).
+        ScheduleSyncWorker.schedule(this)
+
+        // First-run FCM token registration (also handled in onNewToken / foreground sync).
+        try {
+            CoroutineScope(Dispatchers.IO).launch {
+                FcmTokenSync.verifyAndReRegisterIfNeeded(applicationContext)
+            }
+        } catch (_: Throwable) {
+        }
 
         // Subscribe once to admin notice topic so user app can receive pushes.
         try {

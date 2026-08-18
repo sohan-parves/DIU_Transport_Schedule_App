@@ -1,22 +1,30 @@
 package com.sohan.diutransportschedule.ui.navigation
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
-import androidx.compose.ui.zIndex
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
 import com.sohan.diutransportschedule.ui.components.BottomTab
+import com.sohan.diutransportschedule.ui.components.PremiumBottomBar
 import com.sohan.diutransportschedule.ui.home.HomeScreen
 import com.sohan.diutransportschedule.ui.home.HomeViewModel
 import com.sohan.diutransportschedule.ui.map.LiveMapScreen
 import com.sohan.diutransportschedule.ui.notice.NoticeScreen
-import com.sohan.diutransportschedule.ui.components.PremiumBottomBar
 import com.sohan.diutransportschedule.ui.settings.ProfileScreen
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -28,6 +36,7 @@ fun MainNav(
 ) {
     var currentRoute by rememberSaveable { mutableStateOf("home") }
     var profileRenderKey by rememberSaveable { mutableIntStateOf(0) }
+    var mapRenderKey by rememberSaveable { mutableIntStateOf(0) }
     val saveableStateHolder = rememberSaveableStateHolder()
 
     fun navigateInstant(route: String) {
@@ -36,6 +45,10 @@ fun MainNav(
         // 🔥 reset ProfileScreen state when leaving profile tab
         if (currentRoute == "profile" && route != "profile") {
             profileRenderKey++
+        }
+
+        if (route == "map") {
+            mapRenderKey++
         }
 
         currentRoute = route
@@ -69,6 +82,8 @@ fun MainNav(
 
                     if (tab == BottomTab.PROFILE && currentRoute == "profile") {
                         profileRenderKey++
+                    } else if (tab == BottomTab.MAP && currentRoute == "map") {
+                        mapRenderKey++
                     } else {
                         navigateInstant(route)
                     }
@@ -108,7 +123,7 @@ fun MainNav(
                     }
                     .background(if (mapActive) MaterialTheme.colorScheme.background else Color.Transparent)
             ) {
-                saveableStateHolder.SaveableStateProvider("map") {
+                saveableStateHolder.SaveableStateProvider("map_$mapRenderKey") {
                     LiveMapScreen(isTabActive = mapActive)
                 }
             }

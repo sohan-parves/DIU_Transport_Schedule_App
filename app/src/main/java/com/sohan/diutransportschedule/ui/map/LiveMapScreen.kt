@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
@@ -161,6 +162,7 @@ import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import kotlin.math.max
+import androidx.compose.material.icons.filled.Route
 
 sealed class OfflineState {
     data object NotDownloaded : OfflineState()
@@ -232,6 +234,7 @@ private object RouteMapMemoryCache {
     fun remove(routeNo: String) {
         cache.remove(routeNo.trim().uppercase())
     }
+
     fun clear() {
         cache.clear()
     }
@@ -435,7 +438,10 @@ private fun savePersistentRouteMapCache(ctx: Context, data: CachedRouteMapData) 
         }
         ctx.getSharedPreferences(PREF_MAP_CACHE, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_ROUTE_CACHE_PREFIX + data.routeNo.trim().uppercase(Locale.getDefault()), obj.toString())
+            .putString(
+                KEY_ROUTE_CACHE_PREFIX + data.routeNo.trim().uppercase(Locale.getDefault()),
+                obj.toString()
+            )
             .apply()
     } catch (_: Throwable) {
     }
@@ -475,23 +481,31 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
     }
 
     DisposableEffect(Unit) {
-        val listener = SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
-            if (key == "dark_mode") {
-                isDark = sharedPreferences.getBoolean("dark_mode", false)
+        val listener =
+            SharedPreferences.OnSharedPreferenceChangeListener { sharedPreferences, key ->
+                if (key == "dark_mode") {
+                    isDark = sharedPreferences.getBoolean("dark_mode", false)
+                }
             }
-        }
         mapUiPrefs.registerOnSharedPreferenceChangeListener(listener)
         onDispose {
             mapUiPrefs.unregisterOnSharedPreferenceChangeListener(listener)
         }
     }
-    val overlayScrim = if (isDark) Color.Black.copy(alpha = 0.30f) else Color.Black.copy(alpha = 0.18f)
+    val overlayScrim =
+        if (isDark) Color.Black.copy(alpha = 0.30f) else Color.Black.copy(alpha = 0.18f)
 
     // --- Permission state & launcher
     var hasLocationPermission by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(
+                ctx,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+                    ContextCompat.checkSelfPermission(
+                        ctx,
+                        Manifest.permission.ACCESS_COARSE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
         )
     }
     var requestCenterOnUser by remember { mutableStateOf(false) }
@@ -499,7 +513,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
         val granted = result[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-            result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+                result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         hasLocationPermission = granted
         if (granted) {
             requestCenterOnUser = false
@@ -510,7 +524,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
     fun isDeviceLocationEnabled(): Boolean {
         val locationManager = ctx.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         return locationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true ||
-            locationManager?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true
+                locationManager?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true
     }
 
     var showEnableLocationDialog by remember { mutableStateOf(false) }
@@ -535,16 +549,33 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         label = "location_pulse_alpha"
     )
 
+    var appVersionChecked by remember { mutableStateOf(false) }
+    var tabRefreshKey by remember { mutableIntStateOf(0) }
+
     LaunchedEffect(isTabActive) {
         if (!isTabActive) {
             requestCenterOnUser = false
+        } else {
+            // Map tab-এ ঢুকলে in-memory cache clear করে Room DB থেকে fresh data নেবে
+            RouteScheduleMemoryCache.clear()
+            RouteMapMemoryCache.clear()
+            appVersionChecked = false
+            tabRefreshKey++
         }
     }
 
     val rawRouteId by SelectedRoadStore.routeIdFlow(ctx).collectAsState(initial = "")
-    
-    val routePrefs = remember { ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE) }
-    var selectedFridayRoute by remember { mutableStateOf(routePrefs.getString("selected_friday_route", "ALL").orEmpty()) }
+
+    val routePrefs =
+        remember { ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE) }
+    var selectedFridayRoute by remember {
+        mutableStateOf(
+            routePrefs.getString(
+                "selected_friday_route",
+                "ALL"
+            ).orEmpty()
+        )
+    }
     DisposableEffect(Unit) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
             if (key == "selected_friday_route") {
@@ -554,25 +585,31 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         routePrefs.registerOnSharedPreferenceChangeListener(listener)
         onDispose { routePrefs.unregisterOnSharedPreferenceChangeListener(listener) }
     }
-    
+
     val todayIsFriday = try {
         LocalDate.now().dayOfWeek == DayOfWeek.FRIDAY
     } catch (_: Throwable) {
         false
     }
-    
+
     val profileRoutePrefs = remember {
         ctx.getSharedPreferences("profile_route_prefs", Context.MODE_PRIVATE)
     }
     val storedDailyRoute = profileRoutePrefs.getString("selected_route", "ALL").orEmpty()
-    val normalizedRawRouteId = rawRouteId.trim().ifBlank { storedDailyRoute.trim().ifBlank { "ALL" } }
+    val normalizedRawRouteId =
+        rawRouteId.trim().ifBlank { storedDailyRoute.trim().ifBlank { "ALL" } }
     val normalizedFridayRoute = selectedFridayRoute.trim().ifBlank { "ALL" }
     val normalizedStoredDailyRoute = storedDailyRoute.trim().ifBlank { "ALL" }
     val effectiveDailyRoute = when {
         !normalizedRawRouteId.equals("ALL", ignoreCase = true) &&
-            !normalizedRawRouteId.startsWith("F", ignoreCase = true) -> normalizedRawRouteId
+                !normalizedRawRouteId.startsWith("F", ignoreCase = true) -> normalizedRawRouteId
+
         !normalizedStoredDailyRoute.equals("ALL", ignoreCase = true) &&
-            !normalizedStoredDailyRoute.startsWith("F", ignoreCase = true) -> normalizedStoredDailyRoute
+                !normalizedStoredDailyRoute.startsWith(
+                    "F",
+                    ignoreCase = true
+                ) -> normalizedStoredDailyRoute
+
         else -> "ALL"
     }
 
@@ -589,7 +626,8 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         effectiveDailyRoute
     }
 
-    val shouldPromptRoadSelection = routeId.isBlank() || routeId.trim().equals("ALL", ignoreCase = true)
+    val shouldPromptRoadSelection =
+        routeId.isBlank() || routeId.trim().equals("ALL", ignoreCase = true)
     val routeText by SelectedRoadStore.routeTextFlow(ctx).collectAsState(initial = "")
     val style = if (isDark) "dark" else "light"
 
@@ -622,7 +660,6 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
     val workManager = remember { WorkManager.getInstance(ctx) }
     val firestore = remember { FirebaseFirestore.getInstance() }
     var mapCacheVersion by remember { mutableLongStateOf(readCachedMapVersion(ctx)) }
-    var appVersionChecked by remember { mutableStateOf(false) }
 
     suspend fun geocodeRoutePoints(rawText: String): Pair<List<GeoPoint>, List<String>> {
         val cleaned = rawText.trim()
@@ -711,6 +748,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
 
                 asRoute + node.values.flatMap { collectRouteEntries(it) }
             }
+
             is List<*> -> node.flatMap { collectRouteEntries(it) }
             else -> emptyList()
         }
@@ -793,7 +831,8 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         suspend fun routeSegment(a: GeoPoint, b: GeoPoint): List<GeoPoint> {
             return try {
                 val coords = "${a.longitude},${a.latitude};${b.longitude},${b.latitude}"
-                val url = "https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=geojson"
+                val url =
+                    "https://router.project-osrm.org/route/v1/driving/$coords?overview=full&geometries=geojson"
 
                 val conn = URL(url).openConnection() as HttpURLConnection
                 conn.connectTimeout = 8000
@@ -836,7 +875,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         return if (merged.isNotEmpty()) merged else points
     }
 
-    LaunchedEffect(routeId) {
+    LaunchedEffect(routeId, tabRefreshKey) {
         if (routeId.isBlank() || routeId.trim().equals("ALL", ignoreCase = true)) {
             routePoints = emptyList()
             routePointLabels = emptyList()
@@ -883,6 +922,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 prefix + number.toString().padStart(3, '0')
             ).toList()
         }
+
         val allowFirstInstallMapRead = !isFirstInstallMapSyncDone(ctx)
 
         // --- Cache-first block ---
@@ -896,8 +936,14 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         var forceReadAfterMapVersionChange = false
         if (!appVersionChecked) {
             try {
-                if (allowFirstInstallMapRead || !hasSelectedRouteCache || canUseFirestoreWindowForMap(ctx)) {
-                    if (!allowFirstInstallMapRead && hasSelectedRouteCache && canUseFirestoreWindowForMap(ctx)) {
+                if (allowFirstInstallMapRead || !hasSelectedRouteCache || canUseFirestoreWindowForMap(
+                        ctx
+                    )
+                ) {
+                    if (!allowFirstInstallMapRead && hasSelectedRouteCache && canUseFirestoreWindowForMap(
+                            ctx
+                        )
+                    ) {
                         markFirestoreWindowUsedForMap(ctx)
                         firestoreWindowConsumedByMeta = true
                     }
@@ -925,9 +971,10 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
             }
         }
         if (cached != null && (
-                cached.routePoints.isNotEmpty() ||
-                cached.routeStopMarkerPoints.isNotEmpty()
-            )) {
+                    cached.routePoints.isNotEmpty() ||
+                            cached.routeStopMarkerPoints.isNotEmpty()
+                    )
+        ) {
             routeNameFromDb = cached.routeName
             routeDetails = cached.routeDetails
             routePoints = cached.routePoints
@@ -1000,7 +1047,8 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                     ""
                 }
                 routeHasRealRoadPolyline = false
-                routeLoadError = "Route not found for $routeId (found ${entries.size} route entries)"
+                routeLoadError =
+                    "Route not found for $routeId (found ${entries.size} route entries)"
                 routeLoading = false
                 return@LaunchedEffect
             }
@@ -1029,7 +1077,8 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 val allDocs = routesCollection.get().await()
                 return allDocs.documents.firstOrNull { doc ->
                     val docIdMatch = normalizeRouteNo(doc.id) == wanted
-                    val routeNoMatch = normalizeRouteNo(doc.getString("routeNo").orEmpty()) == wanted
+                    val routeNoMatch =
+                        normalizeRouteNo(doc.getString("routeNo").orEmpty()) == wanted
                     docIdMatch || routeNoMatch
                 }?.data
             }
@@ -1058,8 +1107,10 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 "routeId=$routeId wantedRouteNo=$wantedRouteNo entries=${entries.size} matched=${matched != null} routeMapFound=${routeMapData != null}"
             )
 
-            val adminAnchorPolylinePoints = extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolylineAnchors"))
-            val roadPolylinePoints = extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolyline"))
+            val adminAnchorPolylinePoints =
+                extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolylineAnchors"))
+            val roadPolylinePoints =
+                extractGeoPointsFromPolyline(routeMapData?.get("routeRoadPolyline"))
             val stopPoints = extractGeoPointsFromStops(routeMapData?.get("routeStops"))
             val rawPolylinePoints = extractGeoPointsFromPolyline(matched?.get("routePolyline"))
 
@@ -1076,8 +1127,10 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 else -> rawPolylinePoints
             }
             val stopLabelsFromStops = extractStopLabelsFromStops(routeMapData?.get("routeStops"))
-            val stopLabelsFromNames = extractStopLabelsFromStopNames(routeMapData?.get("routeStopNames"))
-            val stopLabelsFromScheduleStops = extractStopLabelsFromScheduleStops(matched.get("routeStops"))
+            val stopLabelsFromNames =
+                extractStopLabelsFromStopNames(routeMapData?.get("routeStopNames"))
+            val stopLabelsFromScheduleStops =
+                extractStopLabelsFromScheduleStops(matched.get("routeStops"))
             val stopLabels = mergePreferredLabels(
                 stopLabelsFromStops,
                 stopLabelsFromNames,
@@ -1088,9 +1141,11 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 adminAnchorPolylinePoints.isNotEmpty() && stopLabels.isNotEmpty() -> {
                     adminAnchorPolylinePoints.take(stopLabels.size)
                 }
+
                 rawPolylinePoints.isNotEmpty() && stopLabels.isNotEmpty() -> {
                     rawPolylinePoints.take(stopLabels.size)
                 }
+
                 else -> emptyList()
             }
             val stopMarkerLabels = if (stopLabels.isNotEmpty()) stopLabels else emptyList()
@@ -1099,12 +1154,20 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 polylinePoints.isNotEmpty() -> {
                     val resolvedStopMarkerLabels = when {
                         stopMarkerLabels.isNotEmpty() -> stopMarkerLabels
-                        stopLabels.isNotEmpty() && stopMarkerPoints.isNotEmpty() -> stopLabels.take(stopMarkerPoints.size)
+                        stopLabels.isNotEmpty() && stopMarkerPoints.isNotEmpty() -> stopLabels.take(
+                            stopMarkerPoints.size
+                        )
+
                         else -> emptyList()
                     }
                     val labels = when {
                         resolvedStopMarkerLabels.isNotEmpty() && stopMarkerPoints.isNotEmpty() ->
-                            buildPointLabelsFromStops(polylinePoints, stopMarkerPoints, resolvedStopMarkerLabels)
+                            buildPointLabelsFromStops(
+                                polylinePoints,
+                                stopMarkerPoints,
+                                resolvedStopMarkerLabels
+                            )
+
                         stopLabels.isNotEmpty() && polylinePoints.size == stopLabels.size -> stopLabels
                         useAdminAnchorPolyline && !useRoadPolyline -> polylinePoints.indices.map { "Selected point ${it + 1}" }
                         else -> polylinePoints.indices.map { "Point ${it + 1}" }
@@ -1113,7 +1176,8 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                     routePointLabels = labels
                     routeStopMarkerPoints = stopMarkerPoints
                     routeStopMarkerLabels = resolvedStopMarkerLabels
-                    routeHasRealRoadPolyline = useRoadPolyline || adminAnchorPolylinePoints.size >= 2 || stopPoints.size >= 2
+                    routeHasRealRoadPolyline =
+                        useRoadPolyline || adminAnchorPolylinePoints.size >= 2 || stopPoints.size >= 2
                     routeLoading = false
                     routeLoadError = ""
                     val cacheData = CachedRouteMapData(
@@ -1132,6 +1196,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                         markFirstInstallMapSyncDone(ctx)
                     }
                 }
+
                 routeDetails.isNotBlank() -> {
                     val (points, labels) = geocodeRoutePoints(routeDetails)
                     routePoints = points
@@ -1161,8 +1226,10 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                         }
                     }
                 }
+
                 else -> {
-                    routeLoadError = "Route details / map data not found for $routeId (found ${entries.size} route entries)"
+                    routeLoadError =
+                        "Route details / map data not found for $routeId (found ${entries.size} route entries)"
                     routeLoading = false
                 }
             }
@@ -1179,7 +1246,8 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
 
     fun startDownload(forceRestart: Boolean = false, allowWhileReady: Boolean = false) {
         val mapId = "dhaka_transport"
-        val url = "https://github.com/sohan-parves/DIUtransportschedule/releases/download/v1.0.0/dhaka_transport_light.mbtiles"
+        val url =
+            "https://github.com/sohan-parves/DIUtransportschedule/releases/download/v1.0.0/dhaka_transport_light.mbtiles"
         val uniqueWorkName = "mbtiles_route_${mapId}_$style"
 
         if (!forceRestart) {
@@ -1236,6 +1304,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                             offlineState = OfflineState.Downloading(0)
                         }
                     }
+
                     WorkInfo.State.RUNNING -> {
                         val p = info.progress.getInt("progress", 0)
                         val doneBytes = info.progress.getLong("done_bytes", 0L)
@@ -1250,6 +1319,7 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                         lastTotalBytes = totalBytes
                         checkingForMapUpdates = false
                     }
+
                     WorkInfo.State.SUCCEEDED -> {
                         val path = info.outputData.getString("file_path")
                         val unchanged = info.outputData.getBoolean("unchanged", false)
@@ -1265,12 +1335,15 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                             else -> OfflineState.Failed("Downloaded file missing")
                         }
                     }
+
                     WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> {
                         checkingForMapUpdates = false
                         lastDoneBytes = 0L
                         lastTotalBytes = -1L
-                        offlineState = OfflineState.Failed("Map download failed. Internet check kore abar try korun.")
+                        offlineState =
+                            OfflineState.Failed("Map download failed. Internet check kore abar try korun.")
                     }
+
                     else -> Unit
                 }
             }
@@ -1298,20 +1371,31 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         when (offlineState) {
             is OfflineState.NotDownloaded,
             is OfflineState.Failed -> startDownload(forceRestart = false)
+
             else -> Unit
         }
     }
 
     Box(Modifier.fillMaxSize()) {
         val downloadProgressPercent = (offlineState as? OfflineState.Downloading)?.progress ?: 0
-        val downloadedMbText = if (lastDoneBytes > 0L) String.format(Locale.US, "%.1f MB", lastDoneBytes / 1024f / 1024f) else "0 MB"
-        val totalMbText = if (lastTotalBytes > 0L) String.format(Locale.US, "%.1f MB", lastTotalBytes / 1024f / 1024f) else "--"
+        val downloadedMbText = if (lastDoneBytes > 0L) String.format(
+            Locale.US,
+            "%.1f MB",
+            lastDoneBytes / 1024f / 1024f
+        ) else "0 MB"
+        val totalMbText = if (lastTotalBytes > 0L) String.format(
+            Locale.US,
+            "%.1f MB",
+            lastTotalBytes / 1024f / 1024f
+        ) else "--"
         val shouldShowDownloadCard = false
         val ready = offlineState as? OfflineState.Ready
 
 
         // Only start live GPS when map is ready, permission is granted, and device location is on
         val shouldTrack = hasLocationPermission && isDeviceLocationEnabled()
+        var requestCenterOnUser by remember { mutableStateOf(false) }
+        var requestCenterOnRoute by remember { mutableStateOf(false) }
         OsmdroidLiveMap(
             mbtilesPath = ready?.filePath,
             enableLiveLocation = shouldTrack,
@@ -1324,6 +1408,8 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
             drawRoadLine = routeHasRealRoadPolyline,
             centerOnUserRequest = requestCenterOnUser,
             onCenterConsumed = { requestCenterOnUser = false },
+            centerOnRouteRequest = requestCenterOnRoute,
+            onRouteCenterConsumed = { requestCenterOnRoute = false },
             isTabActive = isTabActive
         )
         val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
@@ -1334,6 +1420,43 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
         val topAccentText = if (isDark) Color.White.copy(alpha = 0.96f) else Color(0xFF1F2937)
         val topCardShadow = if (isDark) 0.dp else 18.dp
         val topCardShape = RoundedCornerShape(22.dp)
+
+        FloatingActionButton(
+            onClick = {
+                if (routePoints.isNotEmpty()) {
+                    requestCenterOnRoute = false
+                    requestCenterOnRoute = true
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(end = 16.dp, bottom = 172.dp)
+                .size(56.dp)
+                .shadow(
+                    elevation = if (isDark) 0.dp else 12.dp,
+                    shape = CircleShape,
+                    clip = false
+                )
+                .border(
+                    width = if (isDark) 0.dp else 1.dp,
+                    color = if (isDark) Color.Transparent else Color(0xFFE5E7EB),
+                    shape = CircleShape
+                )
+                .zIndex(24f),
+            containerColor = if (isDark) Color(0xFF0B2A66) else Color.White,
+            contentColor = if (isDark) Color.White else Color(0xFF0B2A66),
+            shape = CircleShape,
+            elevation = FloatingActionButtonDefaults.elevation(
+                defaultElevation = 0.dp,
+                pressedElevation = 0.dp
+            )
+        ) {
+            Icon(
+                imageVector = Icons.Default.Route,
+                contentDescription = "Route"
+            )
+        }
 
         // Show currently selected road/filter on top
         if (routeId.isNotBlank() && !routeId.trim().equals("ALL", ignoreCase = true)) {
@@ -1450,12 +1573,15 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                 title = {
                     Text(
                         text = "Location permission needed",
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        color = if (isDark) Color.White else MaterialTheme.colorScheme.onSurface
                     )
                 },
                 text = {
                     Text(
-                        text = "Current location dekhano, My Location button diye map ke apnar nijer position-e neya, ar live tracking map-e show korar jonno location permission dorkar."
+                        text = "Current location dekhano, My Location button diye map ke apnar nijer position-e neya, ar live tracking map-e show korar jonno location permission dorkar.",
+                        color = if (isDark) Color.White.copy(alpha = 0.90f)
+                        else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 },
                 confirmButton = {
@@ -1470,12 +1596,15 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                             )
                         }
                     ) {
-                        Text("Continue")
+                        Text("Continue", color = if (isDark) Color.White else MaterialTheme.colorScheme.onPrimary)
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = { showLocationPermissionDialog = false }) {
-                        Text("Not now")
+                        Text(
+                            "Not now",
+                            color = if (isDark) Color.White else MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
             )
@@ -1499,7 +1628,11 @@ fun LiveMapScreen(isTabActive: Boolean = true) {
                     Button(
                         onClick = {
                             showEnableLocationDialog = false
-                            ctx.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                            ctx.startActivity(
+                                Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(
+                                    Intent.FLAG_ACTIVITY_NEW_TASK
+                                )
+                            )
                         }
                     ) {
                         Text("Open settings")
@@ -1643,11 +1776,20 @@ private fun createRouteStopMarkerBitmap(
     label: String
 ): Bitmap {
     val density = ctx.resources.displayMetrics.density
-    val isDark = (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+    val isDark =
+        (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
-    val bubbleColor = if (isDark) android.graphics.Color.parseColor("#0A1F44") else android.graphics.Color.WHITE
-    val textColor = if (isDark) android.graphics.Color.WHITE else android.graphics.Color.parseColor("#111111")
-    val shadowColor = if (isDark) android.graphics.Color.argb(90, 0, 0, 0) else android.graphics.Color.argb(65, 0, 0, 0)
+    val bubbleColor =
+        if (isDark) android.graphics.Color.parseColor("#0A1F44") else android.graphics.Color.WHITE
+    val textColor =
+        if (isDark) android.graphics.Color.WHITE else android.graphics.Color.parseColor("#111111")
+    val shadowColor =
+        if (isDark) android.graphics.Color.argb(90, 0, 0, 0) else android.graphics.Color.argb(
+            65,
+            0,
+            0,
+            0
+        )
     val pinWidth = (44f * density).toInt()
     val pinHeight = (48f * density).toInt()
     val bubblePadH = 10f * density
@@ -1678,7 +1820,8 @@ private fun createRouteStopMarkerBitmap(
     val bubbleHeight = textHeight + bubblePadV * 2
 
     val totalWidth = max(bubbleWidth, pinWidth.toFloat()).toInt() + (24f * density).toInt()
-    val totalHeight = (bubbleHeight + bubbleGap + pinHeight + baseShadowHeight + pinLift + shadowBlur * 2).toInt()
+    val totalHeight =
+        (bubbleHeight + bubbleGap + pinHeight + baseShadowHeight + pinLift + shadowBlur * 2).toInt()
 
     val bitmap = Bitmap.createBitmap(totalWidth, totalHeight, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
@@ -1810,12 +1953,11 @@ private fun OsmdroidLiveMap(
     drawRoadLine: Boolean,
     centerOnUserRequest: Boolean,
     onCenterConsumed: () -> Unit,
+    centerOnRouteRequest: Boolean,
+    onRouteCenterConsumed: () -> Unit,
     isTabActive: Boolean
-){
+) {
     val ctx = LocalContext.current
-    LaunchedEffect(Unit) {
-        org.osmdroid.config.Configuration.getInstance().userAgentValue = ctx.packageName
-    }
 
     val fused = remember { LocationServices.getFusedLocationProviderClient(ctx) }
     var locationCallback by remember { mutableStateOf<LocationCallback?>(null) }
@@ -1860,16 +2002,22 @@ private fun OsmdroidLiveMap(
     var lastMarkerPhaseBucket by remember { mutableIntStateOf(-1) }
     val latestCenterOnUserRequest by rememberUpdatedState(centerOnUserRequest)
     val latestOnCenterConsumed by rememberUpdatedState(onCenterConsumed)
+    val latestCenterOnRouteRequest by rememberUpdatedState(centerOnRouteRequest)
+    val latestOnRouteCenterConsumed by rememberUpdatedState(onRouteCenterConsumed)
     val latestRoutePoints by rememberUpdatedState(routePoints)
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val compassCardColor = if (isDark) Color(0xFF0A1F44).copy(alpha = 0.96f) else Color.White.copy(alpha = 0.96f)
+    val compassCardColor =
+        if (isDark) Color(0xFF0A1F44).copy(alpha = 0.96f) else Color.White.copy(alpha = 0.96f)
     val compassPrimaryText = if (isDark) Color.White else Color(0xFF111827)
     val compassNorthText = if (isDark) Color(0xFFFF6B6B) else Color(0xFFE53935)
     val compassOuterRing = if (isDark) Color(0xFF08162F) else Color(0xFF0F172A)
     val compassInnerCore = if (isDark) Color(0xFF08162F) else Color(0xFF0F172A)
-    val compassAccent = if (isDark) Color.White.copy(alpha = 0.36f) else Color.White.copy(alpha = 0.30f)
-    val compassCrossMajor = if (isDark) Color.White.copy(alpha = 0.38f) else Color.White.copy(alpha = 0.32f)
-    val compassCrossMinor = if (isDark) Color.White.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.22f)
+    val compassAccent =
+        if (isDark) Color.White.copy(alpha = 0.36f) else Color.White.copy(alpha = 0.30f)
+    val compassCrossMajor =
+        if (isDark) Color.White.copy(alpha = 0.38f) else Color.White.copy(alpha = 0.32f)
+    val compassCrossMinor =
+        if (isDark) Color.White.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.22f)
     val compassNorthNeedle = if (isDark) Color(0xFFFF5A52) else Color(0xFFE53935)
     val compassSouthNeedle = Color.White
 
@@ -1923,7 +2071,8 @@ private fun OsmdroidLiveMap(
 
                     SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
 
-                    val displayRotation = windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+                    val displayRotation =
+                        windowManager?.defaultDisplay?.rotation ?: Surface.ROTATION_0
                     val (axisX, axisY) = when (displayRotation) {
                         Surface.ROTATION_90 -> SensorManager.AXIS_Y to SensorManager.AXIS_MINUS_X
                         Surface.ROTATION_180 -> SensorManager.AXIS_MINUS_X to SensorManager.AXIS_MINUS_Y
@@ -2052,7 +2201,11 @@ private fun OsmdroidLiveMap(
         ).toFloat().coerceAtLeast(0.01f)
 
         val accuracyBaseMeters = when {
-            lastAccuracyMeters != null && lastAccuracyMeters!! > 1f -> maxOf(lastAccuracyMeters!! * 0.9f, 18f)
+            lastAccuracyMeters != null && lastAccuracyMeters!! > 1f -> maxOf(
+                lastAccuracyMeters!! * 0.9f,
+                18f
+            )
+
             else -> 22f
         }
 
@@ -2146,7 +2299,7 @@ private fun OsmdroidLiveMap(
 
     fun focusMapOnStop(mapView: MapView, point: GeoPoint) {
         mapView.post {
-            val targetZoom = maxOf(mapView.zoomLevelDouble, 18.0)
+            val targetZoom = minOf(maxOf(mapView.zoomLevelDouble, 11.0), 12.0)
             mapView.controller.setCenter(point)
             mapView.controller.animateTo(point, targetZoom, 650L)
             mapView.postInvalidate()
@@ -2163,7 +2316,8 @@ private fun OsmdroidLiveMap(
 
         if (wantedCount == 0) {
             map.overlays.removeAll { overlay ->
-                overlay is Marker && overlay.relatedObject?.toString()?.startsWith("selected_route_marker_") == true
+                overlay is Marker && overlay.relatedObject?.toString()
+                    ?.startsWith("selected_route_marker_") == true
             }
             return
         }
@@ -2222,7 +2376,8 @@ private fun OsmdroidLiveMap(
                     overlay.title == "selected_route_polyline_outer" ||
                             overlay.title == "selected_route_polyline_inner"
                     )) ||
-                    (overlay is Marker && overlay.relatedObject?.toString()?.startsWith("selected_route_marker_") == true)
+                    (overlay is Marker && overlay.relatedObject?.toString()
+                        ?.startsWith("selected_route_marker_") == true)
         }
     }
 
@@ -2262,7 +2417,72 @@ private fun OsmdroidLiveMap(
         appliedMbtilesPath = null
     }
 
+    fun isInternetAvailable(): Boolean {
+        return runCatching {
+            val cm =
+                ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val network = cm.activeNetwork ?: return@runCatching false
+            val caps = cm.getNetworkCapabilities(network) ?: return@runCatching false
+            caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        }.getOrDefault(false)
+    }
+
+    fun applyOnlineTileProvider(map: MapView) {
+        if (appliedMbtilesPath == "__online__" && offlineTileProviderRef != null) {
+            map.setUseDataConnection(true)
+            return
+        }
+
+        releaseTileProviderResources()
+
+        val onlineProvider = MapTileProviderBasic(ctx.applicationContext)
+        map.setTileProvider(onlineProvider)
+        map.setTileSource(TileSourceFactory.MAPNIK)
+        map.setUseDataConnection(true)
+
+        offlineTileProviderRef = onlineProvider
+        appliedMbtilesPath = "__online__"
+    }
+
+    fun readMbtilesMetadata(file: File): Triple<Int, Int, String> {
+        var minZoom = 0
+        var maxZoom = 24
+        var extension = ".png"
+
+        runCatching {
+            val db =
+                SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                db.rawQuery("SELECT name, value FROM metadata", null).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        when (cursor.getString(0).lowercase(Locale.US)) {
+                            "minzoom" -> minZoom = cursor.getString(1).toIntOrNull() ?: minZoom
+                            "maxzoom" -> maxZoom = cursor.getString(1).toIntOrNull() ?: maxZoom
+                            "format" -> extension =
+                                when (cursor.getString(1).lowercase(Locale.US).trim()
+                                    .removePrefix(".")) {
+                                    "jpg", "jpeg" -> ".jpg"
+                                    "webp" -> ".webp"
+                                    else -> ".png"
+                                }
+                        }
+                    }
+                }
+            } finally {
+                db.close()
+            }
+        }
+
+        return Triple(minZoom.coerceIn(0, 24), maxZoom.coerceIn(0, 24), extension)
+    }
+
     fun applyTileProvider(map: MapView, mbtilesPath: String?) {
+        if (isInternetAvailable()) {
+            applyOnlineTileProvider(map)
+            return
+        }
+
         val offlineFile = mbtilesPath
             ?.takeIf { it.isNotBlank() }
             ?.let(::File)
@@ -2282,13 +2502,14 @@ private fun OsmdroidLiveMap(
             releaseTileProviderResources()
 
             try {
+                val (minZoom, maxZoom, extension) = readMbtilesMetadata(offlineFile)
                 val archive = MBTilesFileArchive.getDatabaseFileArchive(offlineFile)
                 val tileSource = XYTileSource(
                     "mbtiles_${offlineFile.nameWithoutExtension}",
-                    0,
-                    24,
+                    minZoom,
+                    maxZoom,
                     256,
-                    ".png",
+                    extension,
                     arrayOf("")
                 )
                 val registerReceiver = SimpleRegisterReceiver(ctx)
@@ -2297,6 +2518,7 @@ private fun OsmdroidLiveMap(
                     tileSource,
                     arrayOf<IArchiveFile>(archive)
                 )
+
                 val tileProvider = MapTileProviderArray(
                     tileSource,
                     registerReceiver,
@@ -2305,37 +2527,18 @@ private fun OsmdroidLiveMap(
 
                 map.setTileProvider(tileProvider)
                 map.setTileSource(tileSource)
+                map.minZoomLevel = minZoom.toDouble()
+                map.maxZoomLevel = maxZoom.toDouble()
                 map.setUseDataConnection(false)
 
                 offlineArchiveRef = archive
                 offlineTileProviderRef = tileProvider
                 appliedMbtilesPath = offlineSignature
             } catch (_: Exception) {
-                releaseTileProviderResources()
-
-                val onlineProvider = MapTileProviderBasic(ctx.applicationContext)
-                map.setTileProvider(onlineProvider)
-                map.setTileSource(TileSourceFactory.MAPNIK)
-                map.setUseDataConnection(true)
-
-                offlineTileProviderRef = onlineProvider
-                appliedMbtilesPath = "__online__"
+                applyOnlineTileProvider(map)
             }
         } else {
-            if (appliedMbtilesPath == "__online__" && offlineTileProviderRef != null) {
-                map.setUseDataConnection(true)
-                return
-            }
-
-            releaseTileProviderResources()
-
-            val onlineProvider = MapTileProviderBasic(ctx.applicationContext)
-            map.setTileProvider(onlineProvider)
-            map.setTileSource(TileSourceFactory.MAPNIK)
-            map.setUseDataConnection(true)
-
-            offlineTileProviderRef = onlineProvider
-            appliedMbtilesPath = "__online__"
+            applyOnlineTileProvider(map)
         }
     }
 
@@ -2346,7 +2549,9 @@ private fun OsmdroidLiveMap(
                 overlay is Polyline && overlay.title == "selected_route_polyline_outer" -> 10
                 overlay is Polyline && overlay.title == "selected_route_polyline_inner" -> 11
                 overlay is Polygon && overlay.title == "live_location_accuracy_circle" -> 90
-                overlay is Marker && overlay.relatedObject?.toString()?.startsWith("selected_route_marker_") == true -> 120
+                overlay is Marker && overlay.relatedObject?.toString()
+                    ?.startsWith("selected_route_marker_") == true -> 120
+
                 overlay is Marker && overlay.relatedObject == "live_location_marker" -> 130
                 overlay === compassOverlayRef -> 200
                 overlay is Polyline -> 20
@@ -2361,10 +2566,8 @@ private fun OsmdroidLiveMap(
         lastAccuracyMeters = if (location.hasAccuracy()) location.accuracy else null
 
         mapViewRef?.let { map ->
-
-
             if (shouldCenterNow) {
-                val targetZoom = maxOf(map.zoomLevelDouble, 18.0)
+                val targetZoom = minOf(maxOf(map.zoomLevelDouble, 11.0), 12.0)
                 map.post {
                     map.controller.setCenter(point)
                     map.controller.animateTo(point, targetZoom, 700L)
@@ -2430,7 +2633,7 @@ private fun OsmdroidLiveMap(
         factory = { context ->
             MapView(context).apply {
                 setMultiTouchControls(true)
-                controller.setZoom(15.0)
+                controller.setZoom(12.0)
                 clipToPadding = false
                 setTilesScaledToDpi(true)
                 isHorizontalMapRepetitionEnabled = false
@@ -2483,6 +2686,7 @@ private fun OsmdroidLiveMap(
                         MotionEvent.ACTION_POINTER_UP -> {
                             view.parent?.requestDisallowInterceptTouchEvent(true)
                         }
+
                         MotionEvent.ACTION_UP,
                         MotionEvent.ACTION_CANCEL -> {
                             view.parent?.requestDisallowInterceptTouchEvent(false)
@@ -2553,13 +2757,20 @@ private fun OsmdroidLiveMap(
                 }
 
                 if (!hasFittedRoute) {
+                    val safeMinZoom = map.minZoomLevel.coerceAtLeast(0.0)
+                    val targetZoom = maxOf(12.0, safeMinZoom)
+
                     if (routePoints.size == 1) {
-                        map.controller.setZoom(14.5)
+                        map.controller.setZoom(targetZoom)
                         map.controller.animateTo(routePoints.first())
                     } else {
-                        val box = BoundingBox.fromGeoPointsSafe(routePoints)
-                        map.zoomToBoundingBox(box, true, 120)
+                        val box = BoundingBox.fromGeoPoints(routePoints)
+                        map.zoomToBoundingBox(box, true, 220)
+                        if (map.zoomLevelDouble < safeMinZoom || map.zoomLevelDouble > targetZoom) {
+                            map.controller.setZoom(targetZoom)
+                        }
                     }
+
                     hasFittedRoute = true
                 }
             }
@@ -2570,7 +2781,7 @@ private fun OsmdroidLiveMap(
 
             lastUserLocation?.let { userPoint ->
                 if (enableLiveLocation && !hasCenteredOnUserOnce && latestRoutePoints.isEmpty()) {
-                    map.controller.setZoom(17.0)
+                    map.controller.setZoom(maxOf(12.0, map.minZoomLevel.coerceAtLeast(0.0)))
                     map.controller.animateTo(userPoint)
                     hasCenteredOnUserOnce = true
                 }
@@ -2591,9 +2802,30 @@ private fun OsmdroidLiveMap(
                 }
             }
 
+            if (latestCenterOnRouteRequest) {
+                if (routePoints.isNotEmpty()) {
+                    map.post {
+                        if (routePoints.size == 1) {
+                            val safeMinZoom = map.minZoomLevel.coerceAtLeast(0.0)
+                            map.controller.setZoom(maxOf(12.0, safeMinZoom))
+                            map.controller.animateTo(routePoints.first())
+                        } else {
+                            val box = BoundingBox.fromGeoPoints(routePoints)
+                            map.zoomToBoundingBox(box, true, 220)
+                            val safeMinZoom = map.minZoomLevel.coerceAtLeast(0.0)
+                            if (map.zoomLevelDouble < safeMinZoom) {
+                                map.controller.setZoom(safeMinZoom)
+                            }
+                        }
+                        map.invalidate()
+                    }
+                }
+                latestOnRouteCenterConsumed()
+            }
+
             if (latestCenterOnUserRequest) {
                 lastUserLocation?.let {
-                    val targetZoom = maxOf(map.zoomLevelDouble, 17.5)
+                    val targetZoom = maxOf(12.0, map.minZoomLevel.coerceAtLeast(0.0))
                     map.post {
                         map.controller.setCenter(it)
                         map.controller.animateTo(it, targetZoom, 520L)
@@ -2602,10 +2834,17 @@ private fun OsmdroidLiveMap(
                 }
                 latestOnCenterConsumed()
             }
-            }
-        )
+        }
+    )
 
-    DisposableEffect(enableLiveLocation, mapViewRef, routeId, routeText, isTabActive, mapLifecycleTick) {
+    DisposableEffect(
+        enableLiveLocation,
+        mapViewRef,
+        routeId,
+        routeText,
+        isTabActive,
+        mapLifecycleTick
+    ) {
         val map = mapViewRef
 
         if (!enableLiveLocation || !isTabActive || map == null) {
@@ -2679,7 +2918,8 @@ private fun OsmdroidLiveMap(
 
     val normalizedMapRotation = ((mapOrientationDeg % 360f) + 360f) % 360f
     val normalizedHeadingRotation = ((deviceHeadingDeg % 360f) + 360f) % 360f
-    val effectiveCompassRotation = ((normalizedHeadingRotation - normalizedMapRotation) % 360f + 360f) % 360f
+    val effectiveCompassRotation =
+        ((normalizedHeadingRotation - normalizedMapRotation) % 360f + 360f) % 360f
 
     Box(
         modifier = Modifier
@@ -2841,7 +3081,7 @@ private fun OsmdroidLiveMap(
             mapViewRef?.let { map ->
                 map.overlays.removeAll { overlay ->
                     (overlay is Marker && overlay.relatedObject == "live_location_marker") ||
-                    (overlay is Polygon && overlay.title == "live_location_accuracy_circle")
+                            (overlay is Polygon && overlay.title == "live_location_accuracy_circle")
                 }
                 map.postInvalidate()
             }
@@ -2885,7 +3125,10 @@ private fun OsmdroidLiveMap(
             }
 
             onDispose {
-                try { fused.removeLocationUpdates(callback) } catch (_: SecurityException) { }
+                try {
+                    fused.removeLocationUpdates(callback)
+                } catch (_: SecurityException) {
+                }
                 if (liveLocationCallback === callback) {
                     liveLocationCallback = null
                 }
@@ -2936,4 +3179,4 @@ private fun OsmdroidLiveMap(
             mapViewRef = null
         }
     }
-    }
+}

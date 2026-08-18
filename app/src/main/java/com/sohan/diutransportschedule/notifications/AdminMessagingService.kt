@@ -19,10 +19,17 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.sohan.diutransportschedule.MainActivity
 import com.sohan.diutransportschedule.R
+import com.sohan.diutransportschedule.sync.FcmTokenSync
 import com.sohan.diutransportschedule.ui.notice.cacheNoticeFromPush
 import com.sohan.diutransportschedule.ui.notice.registerNoticePushForHomePopup
+import com.sohan.diutransportschedule.ui.notice.checkAndSyncNoticesFromMeta
 import android.net.Uri
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+
 const val ACTION_NEW_NOTICE = "com.sohan.diutransportschedule.ACTION_NEW_NOTICE"
+const val ACTION_SCHEDULE_UPDATED = "com.sohan.diutransportschedule.ACTION_SCHEDULE_UPDATED"
 
 class AdminMessagingService : FirebaseMessagingService() {
     override fun onCreate() {
@@ -56,6 +63,13 @@ class AdminMessagingService : FirebaseMessagingService() {
             }
         ensureAdminNotificationChannel(applicationContext)
         Log.d("FCM", "New FCM token: $token")
+        // Keep the backend device doc in sync on every token refresh (not just first install).
+        try {
+            CoroutineScope(Dispatchers.IO).launch {
+                FcmTokenSync.registerToken(applicationContext, token, force = true)
+            }
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -72,8 +86,61 @@ class AdminMessagingService : FirebaseMessagingService() {
         )
 
         val nowMs = System.currentTimeMillis()
+        val isScheduleUpdate = isScheduleUpdatePayload(message, type)
+        val looksLikeNotice = !isScheduleUpdate && isNoticePayload(message, type)
 
-        val looksLikeNotice = isNoticePayload(message, type)
+        // FCM push received: schedule update has highest priority
+        if (isScheduleUpdate) {
+            // Schedule update FCM: clear cache → fetch full schedule → re-cache (highest priority)
+            try {
+                val app = applicationContext as? com.sohan.diutransportschedule.App
+                app?.repo?.let { repo ->
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            val result = repo.forceRefreshFromFcm(applicationContext)
+                            Log.d(
+                                "FCM",
+                                "Schedule force-refresh from FCM completed updated=${result.updated} version=${result.version}"
+                            )
+                            if (result.updated) {
+                                val scheduleIntent = Intent(ACTION_SCHEDULE_UPDATED).apply {
+                                    `package` = applicationContext.packageName
+                                    putExtra("version", result.version)
+                                }
+                                Handler(Looper.getMainLooper()).post {
+                                    try {
+                                        applicationContext.sendBroadcast(scheduleIntent)
+                                    } catch (_: Throwable) {
+                                    }
+                                }
+                            }
+                        } catch (e: Throwable) {
+                            Log.w("FCM", "Background schedule force-refresh failed", e)
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w("FCM", "Failed to start background schedule force-refresh", e)
+            }
+        } else if (looksLikeNotice) {
+            try {
+                checkAndSyncNoticesFromMeta(
+                    ctx = applicationContext,
+                    // An FCM notice is an explicit signal to reload. Do not depend on
+                    // a locally inferred version here; it can be stale after a push.
+                    forceBypass = true,
+                    onDone = {
+                        Log.d("FCM", "Notice version check + sync triggered from FCM push completed successfully")
+                        broadcastNoticeReload()
+                    },
+                    onError = { err ->
+                        Log.w("FCM", "Notice version check + sync triggered from FCM push failed: $err")
+                    }
+                )
+            } catch (e: Throwable) {
+                Log.w("FCM", "Failed to start notice version check from FCM push", e)
+            }
+        }
 
         val title = when {
             looksLikeNotice ->
@@ -166,24 +233,13 @@ class AdminMessagingService : FirebaseMessagingService() {
                     createdAtMs = createdAtMs,
                     releaseAtMs = releaseAtMs
                 )
-                try {
-                    val noticeIntent = Intent(ACTION_NEW_NOTICE).apply {
-                        `package` = applicationContext.packageName
-                        putExtra("id", id)
-                        putExtra("title", title)
-                        putExtra("body", body)
-                        putExtra("createdAtMs", createdAtMs)
-                        putExtra("releaseAtMs", releaseAtMs)
-                    }
-                    // UI receivers update Compose state — deliver on main thread.
-                    Handler(Looper.getMainLooper()).post {
-                        try {
-                            applicationContext.sendBroadcast(noticeIntent)
-                        } catch (_: Throwable) {
-                        }
-                    }
-                } catch (_: Throwable) {
-                }
+                broadcastNoticeReload(
+                    id = id,
+                    title = title,
+                    body = body,
+                    createdAtMs = createdAtMs,
+                    releaseAtMs = releaseAtMs
+                )
                 Log.d("FCM", "Notice cached from push: id=$id title=$title")
             } catch (t: Throwable) {
                 Log.w("FCM", "Failed to cache notice locally", t)
@@ -245,6 +301,33 @@ class AdminMessagingService : FirebaseMessagingService() {
             } catch (_: Throwable) {
             }
         }
+    }
+
+    private fun isScheduleUpdatePayload(message: RemoteMessage, type: String): Boolean {
+        val data = message.data
+
+        if (type.equals("admin_message", ignoreCase = true)) return false
+        if (data["type"]?.equals("admin_message", ignoreCase = true) == true) return false
+        if (data["category"]?.equals("admin_message", ignoreCase = true) == true) return false
+        if (data["messageType"]?.equals("admin_message", ignoreCase = true) == true) return false
+
+        if (type.equals("schedule_update", ignoreCase = true)) return true
+        if (type.equals("schedule", ignoreCase = true)) return true
+        if (type.equals("transport_schedule", ignoreCase = true)) return true
+
+        if (data["schedule_update"]?.equals("true", ignoreCase = true) == true) return true
+        if (data.containsKey("scheduleVersion")) return true
+
+        for (key in listOf("event", "kind", "payload_type", "msg_type")) {
+            val value = data[key].orEmpty()
+            if (value.equals("schedule_update", ignoreCase = true)) return true
+            if (value.equals("schedule", ignoreCase = true)) return true
+        }
+
+        val from = message.from.orEmpty()
+        if (from.contains("diu_transport", ignoreCase = true)) return true
+
+        return false
     }
 
     private fun isNoticePayload(message: RemoteMessage, type: String): Boolean {
@@ -318,6 +401,31 @@ class AdminMessagingService : FirebaseMessagingService() {
         return (title.trim() + "|" + body.trim()).hashCode().toString()
     }
 
+    /** Tells an open Notice screen to immediately read the freshly updated local cache. */
+    private fun broadcastNoticeReload(
+        id: String = "",
+        title: String = "",
+        body: String = "",
+        createdAtMs: Long = 0L,
+        releaseAtMs: Long = 0L
+    ) {
+        val noticeIntent = Intent(ACTION_NEW_NOTICE).apply {
+            `package` = applicationContext.packageName
+            putExtra("id", id)
+            putExtra("title", title)
+            putExtra("body", body)
+            putExtra("createdAtMs", createdAtMs)
+            putExtra("releaseAtMs", releaseAtMs)
+        }
+        Handler(Looper.getMainLooper()).post {
+            try {
+                applicationContext.sendBroadcast(noticeIntent)
+            } catch (t: Throwable) {
+                Log.w("FCM", "Notice reload broadcast failed", t)
+            }
+        }
+    }
+
     private fun showAdminNotification(
         context: Context,
         title: String,
@@ -327,8 +435,9 @@ class AdminMessagingService : FirebaseMessagingService() {
         val appContext = context.applicationContext
 
         val notifPrefs = appContext.getSharedPreferences("notice_alert_prefs", MODE_PRIVATE)
-        val vibrationEnabled = notifPrefs.getBoolean("master_notifications_enabled", true) &&
-                notifPrefs.getBoolean("alarm_vibrate_5m", true)
+        // FCM push notifications are always delivered regardless of master_notifications_enabled.
+        // Only the vibration sub-toggle (alarm_vibrate_5m) applies here.
+        val vibrationEnabled = notifPrefs.getBoolean("alarm_vibrate_5m", true)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = appContext.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
@@ -419,8 +528,9 @@ class AdminMessagingService : FirebaseMessagingService() {
 
         val appContext = context.applicationContext
         val notifPrefs = appContext.getSharedPreferences("notice_alert_prefs", MODE_PRIVATE)
-        val vibrationEnabled = notifPrefs.getBoolean("master_notifications_enabled", true) &&
-                notifPrefs.getBoolean("alarm_vibrate_5m", true)
+        // FCM push notifications are always delivered regardless of master_notifications_enabled.
+        // Only the vibration sub-toggle (alarm_vibrate_5m) applies here.
+        val vibrationEnabled = notifPrefs.getBoolean("alarm_vibrate_5m", true)
 
         val nm = appContext.getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         val existing = nm.getNotificationChannel(ADMIN_MSG_CHANNEL_ID)

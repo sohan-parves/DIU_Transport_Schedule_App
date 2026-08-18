@@ -96,6 +96,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sohan.diutransportschedule.R
 import java.time.LocalDate
+import java.time.DayOfWeek
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -109,6 +110,7 @@ import android.content.BroadcastReceiver
 import androidx.core.content.ContextCompat
 import android.content.IntentFilter
 import com.sohan.diutransportschedule.notifications.ACTION_NEW_NOTICE
+import com.sohan.diutransportschedule.notifications.ACTION_SCHEDULE_UPDATED
 import android.content.pm.PackageManager
 import android.content.SharedPreferences
 import android.Manifest
@@ -141,8 +143,6 @@ import java.time.Duration
 
 // --- Notice notification channels ---
 private const val NOTICE_CHANNEL_ID = "admin_notices_v2"
-private const val PREF_FIRST_INSTALL_SYNC = "first_install_sync"
-private const val KEY_FIRST_INSTALL_SYNC_DONE = "first_install_sync_done"
 
 private const val PREF_ADMIN_MESSAGE_POPUP = "admin_message_popup"
 private const val KEY_ADMIN_MESSAGE_ID = "id"
@@ -180,18 +180,6 @@ private fun buildAdminMessageUniqueKey(
 
 
 
-private fun isFirstInstallSyncDone(context: Context): Boolean {
-    return context.getSharedPreferences(PREF_FIRST_INSTALL_SYNC, Context.MODE_PRIVATE)
-        .getBoolean(KEY_FIRST_INSTALL_SYNC_DONE, false)
-}
-
-private fun markFirstInstallSyncDone(context: Context) {
-    context.getSharedPreferences(PREF_FIRST_INSTALL_SYNC, Context.MODE_PRIVATE)
-        .edit()
-        .putBoolean(KEY_FIRST_INSTALL_SYNC_DONE, true)
-        .apply()
-}
-
 // import androidx.compose.foundation.isSystemInDarkTheme
 /* ------------------ ENTRY (PUBLIC) ------------------ */
 
@@ -221,13 +209,13 @@ fun HomeScreen(
     val selectedRoute by vm.selectedRoute.collectAsState()
     val syncing by vm.isSyncing.collectAsState()
     val items by vm.items.collectAsState()
+    val scheduleUpdatedAtMillis by vm.scheduleUpdatedAtMillis.collectAsState()
 
     val appDark by vm.darkMode.collectAsState()
     val compact by vm.compactMode.collectAsState()
 
     val showUpdate by vm.showUpdate.collectAsState()
     val updateMessage by vm.updateMessage.collectAsState()
-    val syncStatusMessage by vm.syncStatusMessage.collectAsState()
 
     var query by rememberSaveable { mutableStateOf("") }
 
@@ -409,16 +397,12 @@ fun HomeScreen(
     LaunchedEffect(homeInitialRefreshDone) {
         if (!homeInitialRefreshDone) {
             homeInitialRefreshDone = true
-            val firstInstallSync = !isFirstInstallSyncDone(ctx)
             vm.refresh(
                 showBannerIfUpdated = true,
-                allowDataRead = firstInstallSync,
+                allowDataRead = true,
                 context = ctx,
                 isManualRefresh = false
             )
-            if (firstInstallSync) {
-                markFirstInstallSyncDone(ctx)
-            }
         }
     }
 
@@ -528,6 +512,17 @@ fun HomeScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // Foreground auto-reload (Section 3): on every resume, run the version check
+    // when online; silently keep the cached schedule when offline.
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event != Lifecycle.Event.ON_RESUME) return@LifecycleEventObserver
+            vm.checkForUpdatesOnResume(ctx)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // Low-read Notice updates: listen only to meta/notices.version
     // ✅ Notice popup + notification when a NEW notice is published
     // We listen only to the latest notice (limit 1). This is a single-document listener.
@@ -584,17 +579,28 @@ fun HomeScreen(
             }
         }
 
+        val scheduleUpdateReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != ACTION_SCHEDULE_UPDATED) return
+                vm.onScheduleUpdatedFromPush()
+            }
+        }
+
         val noticeFilter = IntentFilter(ACTION_NEW_NOTICE)
         val adminFilter = IntentFilter(AdminMessagingService.ACTION_NEW_ADMIN_MESSAGE)
+        val scheduleFilter = IntentFilter(ACTION_SCHEDULE_UPDATED)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ctx.registerReceiver(noticeReceiver, noticeFilter, Context.RECEIVER_NOT_EXPORTED)
             ctx.registerReceiver(adminMessageReceiver, adminFilter, Context.RECEIVER_NOT_EXPORTED)
+            ctx.registerReceiver(scheduleUpdateReceiver, scheduleFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("DEPRECATION")
             ctx.registerReceiver(noticeReceiver, noticeFilter)
             @Suppress("DEPRECATION")
             ctx.registerReceiver(adminMessageReceiver, adminFilter)
+            @Suppress("DEPRECATION")
+            ctx.registerReceiver(scheduleUpdateReceiver, scheduleFilter)
         }
 
         onDispose {
@@ -604,6 +610,10 @@ fun HomeScreen(
             }
             try {
                 ctx.unregisterReceiver(adminMessageReceiver)
+            } catch (_: Throwable) {
+            }
+            try {
+                ctx.unregisterReceiver(scheduleUpdateReceiver)
             } catch (_: Throwable) {
             }
         }
@@ -620,7 +630,11 @@ fun HomeScreen(
                 .fillMaxSize()
                 .then(if (showUpdateOverlay) Modifier.blur(18.dp) else Modifier)
         ) {
-            PremiumHeader(selectedRoute = selectedRoute, syncing = syncing)
+            PremiumHeader(
+                selectedRoute = selectedRoute,
+                syncing = syncing,
+                updatedAtMillis = scheduleUpdatedAtMillis
+            )
 
             Spacer(Modifier.height(8.dp))
 
@@ -630,27 +644,19 @@ fun HomeScreen(
                     onChange = { query = it },
                     onClear = { query = "" }
                 )
-
-                Spacer(Modifier.height(2.dp))
-
-
-
-                if (syncStatusMessage.isNotBlank()) {
-                    UpdateBanner(
-                        message = syncStatusMessage,
-                        onOk = { vm.dismissSyncStatus() },
-                        appDark = appDark,
-                        onOpen = { }
-                    )
-                }
             }
 
             Spacer(Modifier.height(3.dp))
 
             if (items.isEmpty()) {
-                Column(Modifier.padding(horizontal = 16.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
                     EmptyStateCard(isSyncing = syncing, appDark = appDark)
-                    Spacer(Modifier.height(96.dp))
                 }
             } else {
                 LazyColumn(
@@ -1123,7 +1129,11 @@ private fun postNoticeNotificationV2(context: Context, title: String, body: Stri
 /* ------------------ HEADER ------------------ */
 
 @Composable
-private fun PremiumHeader(selectedRoute: String, syncing: Boolean) {
+private fun PremiumHeader(
+    selectedRoute: String,
+    syncing: Boolean,
+    updatedAtMillis: Long
+) {
 
     val gradient = Brush.verticalGradient(
         colors = listOf(
@@ -1182,13 +1192,38 @@ private fun PremiumHeader(selectedRoute: String, syncing: Boolean) {
             else
                 "Daily Schedule • Route: $selectedRoute"
 
-            Text(
-                text = sub,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.88f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            val updatedDate = remember(updatedAtMillis) {
+                if (updatedAtMillis > 0L) {
+                    Instant.ofEpochMilli(updatedAtMillis)
+                        .atZone(ZoneId.of("Asia/Dhaka"))
+                        .format(DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.ENGLISH))
+                } else {
+                    ""
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = sub,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.88f),
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (updatedDate.isNotBlank()) {
+                    Text(
+                        text = "Last updated: $updatedDate",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f),
+                        maxLines = 1
+                    )
+                }
+            }
         }
     }
 }
@@ -1517,18 +1552,32 @@ private fun FullUpdateOverlay(
 
 @Composable
 private fun EmptyStateCard(isSyncing: Boolean, appDark: Boolean) {
+    val isFriday = remember { LocalDate.now().dayOfWeek == DayOfWeek.FRIDAY }
+
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("No schedule found", style = MaterialTheme.typography.titleMedium)
+        Column(
+            Modifier
+                .padding(24.dp)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            val emoji = if (isFriday) "🏖️" else "🚌"
+            val titleText = if (isFriday) "It's Friday! No schedule found" else "No schedule found"
+
+            Text(emoji, style = MaterialTheme.typography.displayMedium)
+            Text(titleText, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
             Text(
                 if (isSyncing) "Syncing… please wait"
                 else "Pull down to refresh or change filter in Profile.",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.88f)
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.88f),
+                textAlign = TextAlign.Center
             )
         }
     }

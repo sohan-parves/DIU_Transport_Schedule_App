@@ -13,12 +13,16 @@ object AppUpdateFeatureGuideContent {
         subtitle = "Update guide: important changes you should know",
         items = listOf(
             AppFeatureGuideItem(
-                title = "Update Notice System",
-                description = "Now you can recived Notice on Time"
+                title = "Schedule last-updated date",
+                description = "The Daily Schedule header now shows when the schedule was last updated."
             ),
             AppFeatureGuideItem(
-                title = "Route Select System Update",
-                description = "Now you can Select Friday Route and recived notification On friday"
+                title = "Faster notice updates",
+                description = "When a new notice arrives through FCM, the Notice page refreshes automatically and shows it right away."
+            ),
+            AppFeatureGuideItem(
+                title = "Improved notification reliability",
+                description = "Notification and background-activity guidance has been improved to help you receive transport updates reliably."
             )
         )
     )

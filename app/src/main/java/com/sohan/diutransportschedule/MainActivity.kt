@@ -126,6 +126,16 @@ import androidx.compose.ui.graphics.Color as ComposeColor
 // 🚀 For real publish (production), keep this false.
 private const val USE_EMULATOR = false
 
+fun readSavedDarkMode(context: Context): Boolean {
+    val p = context.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
+    return when {
+        p.contains("dark_mode") -> p.getBoolean("dark_mode", false)
+        p.contains("dark") -> p.getBoolean("dark", false)
+        p.contains("darkMode") -> p.getBoolean("darkMode", false)
+        else -> true
+    }
+}
+
 
 class MainActivity : ComponentActivity() {
     private fun handleAlarmNotificationLaunch(intent: Intent?) {
@@ -271,13 +281,7 @@ class MainActivity : ComponentActivity() {
         requestAction: () -> Unit,
         onSkip: (() -> Unit)? = null
     ) {
-        val p = applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
-        val dark = when {
-            p.contains("dark_mode") -> p.getBoolean("dark_mode", false)
-            p.contains("dark") -> p.getBoolean("dark", false)
-            p.contains("darkMode") -> p.getBoolean("darkMode", false)
-            else -> true
-        }
+        val dark = readSavedDarkMode(applicationContext)
 
         val dialogTheme = if (dark) android.R.style.Theme_DeviceDefault_Dialog_Alert else android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
         val dialog = AlertDialog.Builder(this, dialogTheme)
@@ -376,13 +380,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         requestWindowFeature(Window.FEATURE_NO_TITLE)
-        val p = applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
-        val savedDark = when {
-            p.contains("dark_mode") -> p.getBoolean("dark_mode", false)
-            p.contains("dark") -> p.getBoolean("dark", false)
-            p.contains("darkMode") -> p.getBoolean("darkMode", false)
-            else -> true
-        }
+        val savedDark = readSavedDarkMode(applicationContext)
         super.onCreate(savedInstanceState)
         window.setBackgroundDrawable(
             android.graphics.drawable.ColorDrawable(
@@ -462,15 +460,10 @@ class MainActivity : ComponentActivity() {
                         if (dark) androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_YES else androidx.appcompat.app.AppCompatDelegate.MODE_NIGHT_NO
                     )
 
-                    val prefs = applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
-                    val current = when {
-                        prefs.contains("dark_mode") -> prefs.getBoolean("dark_mode", false)
-                        prefs.contains("dark") -> prefs.getBoolean("dark", false)
-                        prefs.contains("darkMode") -> prefs.getBoolean("darkMode", false)
-                        else -> true
-                    }
+                    val current = readSavedDarkMode(applicationContext)
                     if (current != dark) {
-                        prefs.edit().putBoolean("dark_mode", dark).apply()
+                        applicationContext.getSharedPreferences("ui_prefs", Context.MODE_PRIVATE)
+                            .edit().putBoolean("dark_mode", dark).apply()
                     }
                 }
                 val items by vm.items.collectAsState()
@@ -618,9 +611,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    override fun onStart() {
-        super.onStart()
-    }
+
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -971,6 +962,7 @@ private fun ensureAdminUpdatesChannel(ctx: Context) {
 @Composable
 private fun RequestStartupPermissionsAndFeatureGuide() {
     val ctx = LocalContext.current
+    val isDark = readSavedDarkMode(ctx)
 
     LaunchedEffect(Unit) {
         ensureAdminUpdatesChannel(ctx)
@@ -1089,6 +1081,34 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(fallback)
+        }
+    }
+
+    fun isBatteryOptimizationIgnored(context: Context): Boolean {
+        return try {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun isXiaomiFamily(): Boolean {
+        val m = Build.MANUFACTURER.lowercase()
+        return m.contains("xiaomi") || m.contains("redmi") || m.contains("poco")
+    }
+
+    fun isOppoFamily(): Boolean {
+        val m = Build.MANUFACTURER.lowercase()
+        return m.contains("oppo") || m.contains("realme") || m.contains("oneplus") || m.contains("vivo")
+    }
+
+    /** Routes to the most relevant OEM battery/autostart screen, falling back to the standard one. */
+    fun openBatteryOptimizationSettingsForDevice(context: Context) {
+        when {
+            isXiaomiFamily() -> openMiuiBatterySettings(context)
+            isOppoFamily() -> openOppoRealmeAutoStartSettings(context)
+            else -> openIgnoreBatteryOptimizationsSettings(context)
         }
     }
 
@@ -1217,9 +1237,17 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         if (step < 3) {
             step = 3
             prefs.edit().putInt("step", step).apply()
+
+            // One-time, non-intrusive battery-optimization prompt (Section 6b).
+            // Skipped entirely if the app is already exempted from battery optimization.
+            if (!isBatteryOptimizationIgnored(ctx)) {
+                showOemBgDialog = true
+            }
+            // Always stop here so the feature guide never stacks over the prompt.
+            return@LaunchedEffect
         }
 
-        if (step < 4) {
+        if (step < 4 && !showOemBgDialog) {
             finishStartupPermissionFlow()
         }
 
@@ -1227,8 +1255,77 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         showUpdateGuide = shouldShowUpdateGuide(ctx)
     }
 
+    if (showOemBgDialog) {
+        val brandLabel = hostActivity?.permissionBrandLabel() ?: "Android"
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = {
+                showOemBgDialog = false
+                finishStartupPermissionFlow()
+            },
+            title = {
+                Text(
+                    text = "Keep notifications reliable",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isDark) ComposeColor.White else MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                val appLabel = try {
+                    ctx.getString(com.sohan.diutransportschedule.R.string.app_name)
+                } catch (_: Throwable) {
+                    "DIU Transport Schedule"
+                }
+                Text(
+                    text = "To keep transport notices and schedule reminders arriving even " +
+                            "after days of inactivity, " +
+                            (if (isXiaomiFamily()) {
+                                "allow \"$appLabel\" to autostart and run in the background on " +
+                                        "$brandLabel devices."
+                            } else if (isOppoFamily()) {
+                                "enable \"Allow auto-launch\" and \"Allow background activity\" for " +
+                                        "\"$appLabel\" on $brandLabel devices."
+                            } else {
+                                "turn off battery optimization for \"$appLabel\"."
+                            }),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (isDark) ComposeColor.White.copy(alpha = 0.90f)
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showOemBgDialog = false
+                        openBatteryOptimizationSettingsForDevice(ctx)
+                        finishStartupPermissionFlow()
+                    }
+                ) {
+                    Text(
+                        "Open settings",
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isDark) ComposeColor.White else MaterialTheme.colorScheme.primary
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showOemBgDialog = false
+                        finishStartupPermissionFlow()
+                    }
+                ) {
+                    Text(
+                        "Not now",
+                        color = if (isDark) ComposeColor.White else MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        )
+    }
 
-    if (showWelcomeGuide) {
+
+    if (!showOemBgDialog && showWelcomeGuide) {
         AppFeatureGuideDialog(
             guide = AppFeatureGuideContent.model,
             onClose = {
@@ -1238,7 +1335,7 @@ private fun RequestStartupPermissionsAndFeatureGuide() {
         )
     }
 
-    if (!showWelcomeGuide && showUpdateGuide) {
+    if (!showOemBgDialog && !showWelcomeGuide && showUpdateGuide) {
         AppFeatureGuideDialog(
             guide = AppUpdateFeatureGuideContent.model,
             onClose = {

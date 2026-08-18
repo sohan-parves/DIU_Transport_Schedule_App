@@ -3457,6 +3457,25 @@ fun ProfileScreen(vm: HomeViewModel) {
                                     text = "4. Select \"No restriction\", \"Unrestricted\" or \"Don't optimize\"",
                                     color = primaryText
                                 )
+                                Button(
+                                    onClick = { openBatteryOptimizationSettings(ctx) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.BatteryChargingFull,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text("Open battery settings")
+                                    }
+                                }
                             }
                         }
 
@@ -3827,4 +3846,55 @@ private fun ColorScheme.surfaceColorAtElevation(elevation: Dp): Color {
     }
 
     return this.surfaceVariant.copy(alpha = alpha).compositeOver(base)
+}
+
+/** One-tap battery-optimization / OEM autostart deep link from the Settings screen. */
+private fun openBatteryOptimizationSettings(context: Context) {
+    val manufacturer = Build.MANUFACTURER.lowercase()
+
+    fun open(intent: Intent): Boolean {
+        return try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    val opened = if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || manufacturer.contains("poco")) {
+        open(
+            Intent().setComponent(
+                android.content.ComponentName(
+                    "com.miui.securitycenter",
+                    "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                )
+            )
+        )
+    } else if (manufacturer.contains("oppo") || manufacturer.contains("realme") || manufacturer.contains("oneplus")) {
+        val candidates = listOf(
+            Intent().setClassName("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"),
+            Intent().setClassName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+            Intent().setClassName("com.oppo.safe", "com.oppo.safe.permission.startup.StartupAppListActivity")
+        )
+        candidates.any { open(it) }
+    } else {
+        false
+    }
+
+    if (!opened) {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:${context.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (_: Throwable) {
+            val fallback = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { context.startActivity(fallback) }
+        }
+    }
 }
